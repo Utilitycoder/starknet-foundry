@@ -1,40 +1,71 @@
 use anyhow::{anyhow, bail, Context, Result};
 use camino::Utf8PathBuf;
-use clap::Parser;
+use clap::{Parser, Subcommand, ValueEnum};
+use forge::scarb::config_from_scarb_for_package;
 use include_dir::{include_dir, Dir};
+use scarb_artifacts::{
+    corelib_for_package, dependencies_for_package, get_contracts_map, name_for_package,
+    paths_for_package,
+};
 use scarb_metadata::{MetadataCommand, PackageMetadata};
 use scarb_ui::args::PackagesFilter;
-use std::env;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::{env, fs};
 use tempfile::{tempdir, TempDir};
+use tokio::runtime::Builder;
 
-use forge::{pretty_printing, RunnerConfig, RunnerParams};
+use forge::{pretty_printing, CancellationTokens, RunnerConfig, RunnerParams, CACHE_DIR};
 use forge::{run, TestCrateSummary};
 
-use forge::scarb::{
-    config_from_scarb_for_package, corelib_for_package, dependencies_for_package,
-    get_contracts_map, name_for_package, paths_for_package, target_dir_for_package,
-    target_name_for_package, try_get_starknet_artifacts_path,
-};
 use forge::test_case_summary::TestCaseSummary;
 use std::process::{Command, Stdio};
-
+use std::thread::available_parallelism;
 mod init;
 
 static PREDEPLOYED_CONTRACTS: Dir = include_dir!("crates/cheatnet/predeployed-contracts");
 
 #[derive(Parser, Debug)]
 #[command(version)]
-struct Args {
+#[clap(name = "snforge")]
+struct Cli {
+    #[command(subcommand)]
+    subcommand: ForgeSubcommand,
+}
+
+#[derive(Subcommand, Debug)]
+enum ForgeSubcommand {
+    /// Run tests for a project in the current directory
+    Test {
+        #[command(flatten)]
+        args: TestArgs,
+    },
+    /// Create a new directory with a Forge project
+    Init {
+        /// Name of a new project
+        name: String,
+    },
+    /// Clean Forge cache directory
+    CleanCache {},
+}
+
+#[derive(ValueEnum, Debug, Clone)]
+enum ColorOption {
+    Auto,
+    Always,
+    Never,
+}
+
+#[derive(Parser, Debug)]
+#[allow(clippy::struct_excessive_bools)]
+struct TestArgs {
     /// Name used to filter tests
     test_filter: Option<String>,
     /// Use exact matches for `test_filter`
     #[arg(short, long)]
     exact: bool,
-    /// Create a new directory and forge project named <NAME>
-    #[arg(long, value_name = "NAME")]
-    init: Option<String>,
-    /// Stop test execution after the first failed test
+
+    /// Stop executing tests after the first failed test
     #[arg(short = 'x', long)]
     exit_first: bool,
 
@@ -44,10 +75,20 @@ struct Args {
     /// Number of fuzzer runs
     #[arg(short = 'r', long, value_parser = validate_fuzzer_runs_value)]
     fuzzer_runs: Option<u32>,
-
     /// Seed for the fuzzer
     #[arg(short = 's', long)]
     fuzzer_seed: Option<u64>,
+
+    /// Run only tests marked with `#[ignore]` attribute
+    #[arg(long = "ignored")]
+    only_ignored: bool,
+    /// Run all tests regardless of `#[ignore]` attribute
+    #[arg(long, conflicts_with = "only_ignored")]
+    include_ignored: bool,
+
+    /// Control when colored output is used
+    #[arg(value_enum, long, default_value_t = ColorOption::Auto, value_name="WHEN")]
+    color: ColorOption,
 }
 
 fn validate_fuzzer_runs_value(val: &str) -> Result<u32> {
@@ -58,6 +99,16 @@ fn validate_fuzzer_runs_value(val: &str) -> Result<u32> {
         bail!("Number of fuzzer runs must be greater than or equal to 3")
     }
     Ok(parsed_val)
+}
+
+fn clean_cache() -> Result<()> {
+    let scarb_metadata = MetadataCommand::new().inherit_stderr().exec()?;
+    let workspace_root = scarb_metadata.workspace.root.clone();
+    let cache_dir = workspace_root.join(CACHE_DIR);
+    if cache_dir.exists() {
+        fs::remove_dir_all(cache_dir)?;
+    }
+    Ok(())
 }
 
 fn load_predeployed_contracts() -> Result<TempDir> {
@@ -76,88 +127,102 @@ fn extract_failed_tests(tests_summaries: Vec<TestCrateSummary>) -> Vec<TestCaseS
         .collect()
 }
 
-fn main_execution() -> Result<bool> {
-    let args = Args::parse();
-    if let Some(project_name) = args.init {
-        init::run(project_name.as_str())?;
-        return Ok(true);
+fn test_workspace(args: TestArgs) -> Result<bool> {
+    match args.color {
+        ColorOption::Always => env::set_var("CLICOLOR_FORCE", "1"),
+        ColorOption::Never => env::set_var("CLICOLOR", "0"),
+        ColorOption::Auto => (),
     }
+
+    let scarb_metadata = MetadataCommand::new().inherit_stderr().exec()?;
+    let workspace_root = scarb_metadata.workspace.root.clone();
 
     let predeployed_contracts_dir = load_predeployed_contracts()?;
     let predeployed_contracts_path: PathBuf = predeployed_contracts_dir.path().into();
     let predeployed_contracts = Utf8PathBuf::try_from(predeployed_contracts_path.clone())
         .context("Failed to convert path to predeployed contracts to Utf8PathBuf")?;
 
-    which::which("scarb")
-        .context("Cannot find `scarb` binary in PATH. Make sure you have Scarb installed https://github.com/software-mansion/scarb")?;
-
-    let scarb_metadata = MetadataCommand::new().inherit_stderr().exec()?;
-
     let packages: Vec<PackageMetadata> = args
         .packages_filter
         .match_many(&scarb_metadata)
         .context("Failed to find any packages matching the specified filter")?;
 
-    let package_root = &scarb_metadata.workspace.root;
-    let mut all_failed_tests = vec![];
-    for package in &packages {
-        let forge_config = config_from_scarb_for_package(&scarb_metadata, &package.id)?;
-        let (package_path, package_source_dir_path) =
-            paths_for_package(&scarb_metadata, &package.id)?;
-        env::set_current_dir(package_path.clone())?;
+    let cores = if let Ok(available_cores) = available_parallelism() {
+        available_cores.get()
+    } else {
+        eprintln!("Failed to get the number of available cores, defaulting to 1");
+        1
+    };
 
-        // TODO(#671)
-        let target_dir = target_dir_for_package(&scarb_metadata.workspace.root)?;
+    let rt = Builder::new_multi_thread()
+        .max_blocking_threads(cores)
+        .enable_all()
+        .build()?;
 
-        let build_output = Command::new("scarb")
-            .arg("build")
-            .stderr(Stdio::inherit())
-            .stdout(Stdio::inherit())
-            .output()
-            .context("Failed to build contracts with Scarb")?;
-        if !build_output.status.success() {
-            bail!("Scarb build did not succeed")
-        }
+    let all_failed_tests = rt.block_on({
+        rt.spawn(async move {
+            let mut all_failed_tests = vec![];
+            for package in &packages {
+                let forge_config = config_from_scarb_for_package(&scarb_metadata, &package.id)?;
+                let (package_path, package_source_dir_path) =
+                    paths_for_package(&scarb_metadata, &package.id)?;
+                env::set_current_dir(package_path.clone())?;
 
-        let package_name = name_for_package(&scarb_metadata, &package.id)?;
-        let dependencies = dependencies_for_package(&scarb_metadata, &package.id)?;
-        let target_name = target_name_for_package(&scarb_metadata, &package.id)?;
-        let corelib_path = corelib_for_package(&scarb_metadata, &package.id)?;
-        let runner_config = RunnerConfig::new(
-            args.test_filter.clone(),
-            args.exact,
-            args.exit_first,
-            args.fuzzer_runs,
-            args.fuzzer_seed,
-            &forge_config,
-        );
+                // TODO(#671)
+                let build_output = Command::new("scarb")
+                    .arg("build")
+                    .stderr(Stdio::inherit())
+                    .stdout(Stdio::inherit())
+                    .output()
+                    .context("Failed to build contracts with Scarb")?;
+                if !build_output.status.success() {
+                    bail!("Scarb build did not succeed")
+                }
 
-        let contracts_path = try_get_starknet_artifacts_path(&target_dir, &target_name)?;
-        let contracts = contracts_path
-            .map(|path| get_contracts_map(&path))
-            .transpose()?
-            .unwrap_or_default();
+                let package_name = Arc::new(name_for_package(&scarb_metadata, &package.id)?);
+                let dependencies = dependencies_for_package(&scarb_metadata, &package.id)?;
+                let corelib_path = corelib_for_package(&scarb_metadata, &package.id)?;
 
-        let runner_params = RunnerParams::new(
-            corelib_path,
-            contracts,
-            predeployed_contracts.clone(),
-            env::vars().collect(),
-        );
+                let contracts = get_contracts_map(&scarb_metadata, &package.id).unwrap_or_default();
 
-        let tests_file_summaries = run(
-            package_root,
-            &package_path,
-            &package_name,
-            &package_source_dir_path,
-            &dependencies,
-            &runner_config,
-            &runner_params,
-        )?;
+                let runner_config = Arc::new(RunnerConfig::new(
+                    workspace_root.clone(),
+                    args.test_filter.clone(),
+                    args.exact,
+                    args.exit_first,
+                    args.only_ignored,
+                    args.include_ignored,
+                    args.fuzzer_runs,
+                    args.fuzzer_seed,
+                    &forge_config,
+                ));
 
-        let mut failed_tests = extract_failed_tests(tests_file_summaries);
-        all_failed_tests.append(&mut failed_tests);
-    }
+                let runner_params = Arc::new(RunnerParams::new(
+                    corelib_path,
+                    contracts,
+                    predeployed_contracts.clone(),
+                    env::vars().collect(),
+                    dependencies,
+                ));
+
+                let cancellation_tokens = Arc::new(CancellationTokens::new());
+
+                let tests_file_summaries = run(
+                    &package_path,
+                    &package_name,
+                    &package_source_dir_path,
+                    runner_config,
+                    runner_params,
+                    cancellation_tokens,
+                )
+                .await?;
+
+                let mut failed_tests = extract_failed_tests(tests_file_summaries);
+                all_failed_tests.append(&mut failed_tests);
+            }
+            Ok(all_failed_tests)
+        })
+    })??;
 
     // Explicitly close the temporary directories so we can handle the errors
     predeployed_contracts_dir.close().with_context(|| {
@@ -170,6 +235,26 @@ fn main_execution() -> Result<bool> {
     pretty_printing::print_failures(&all_failed_tests);
 
     Ok(all_failed_tests.is_empty())
+}
+
+#[allow(clippy::too_many_lines)]
+fn main_execution() -> Result<bool> {
+    let cli = Cli::parse();
+
+    which::which("scarb")
+        .context("Cannot find `scarb` binary in PATH. Make sure you have Scarb installed https://github.com/software-mansion/scarb")?;
+
+    match cli.subcommand {
+        ForgeSubcommand::Init { name } => {
+            init::run(name.as_str())?;
+            Ok(true)
+        }
+        ForgeSubcommand::CleanCache {} => {
+            clean_cache()?;
+            Ok(true)
+        }
+        ForgeSubcommand::Test { args } => test_workspace(args),
+    }
 }
 
 fn main() {

@@ -6,6 +6,14 @@ fn always_five(a: felt252, b: felt252) -> felt252{
     5
 }
 
+fn fib(a: felt252, b: felt252, n: felt252) -> felt252 {
+    match n {
+        0 => a,
+        _ => fib(b, a + b, n - 1),
+    }
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::adder;
@@ -40,6 +48,13 @@ mod tests {
     fn failing_fuzz(a: felt252, b: felt252) {
         let result = always_five(a, b);
         assert(result == a + b, 'result == a + b');
+    }
+
+    #[test]
+    #[fuzzer(runs: 10, seed: 100)]
+    fn custom_fuzzer_config(b: felt252) {
+        let result = adder(2, b);
+        assert(result == 2 + b, '2 + b == 2 + b');
     }
 
     #[test]

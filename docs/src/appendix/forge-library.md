@@ -9,6 +9,7 @@
 * [`print`](forge-library/print.md) - displays test data
 * [`fs`](forge-library/fs.md) - module containing functions for interacting with the filesystem
 * [`env`](forge-library/env.md) - module containing functions for interacting with the system environment
+* [`signature`](forge-library/signature.md) - module containing struct and trait for creating `ecdsa` signatures
 
 > ℹ️ **Info**
 > To use the library functions you need to add `snforge_std` package as a dependency in
@@ -16,5 +17,5 @@
 > using appropriate release tag.
 >```toml
 > [dependencies]
-> snforge_std = { git = "https://github.com/foundry-rs/starknet-foundry.git", tag = "v0.5.0" }
+> snforge_std = { git = "https://github.com/foundry-rs/starknet-foundry.git", tag = "v0.7.1" }
 > ```

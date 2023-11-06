@@ -16,7 +16,9 @@ use starknet_api::{
     transaction::Calldata,
 };
 
-use super::{entry_point::execute_call_entry_point, syscalls::CheatableSyscallHandler};
+use super::{
+    cheatable_syscall_handler::CheatableSyscallHandler, entry_point::execute_call_entry_point,
+};
 
 // blockifier/src/execution/syscalls/hint_processor.rs:541 (execute_inner_call)
 pub fn execute_inner_call(
@@ -29,7 +31,7 @@ pub fn execute_inner_call(
     let call_info = execute_call_entry_point(
         call,
         syscall_handler.syscall_handler.state,
-        syscall_handler.cheatcode_state,
+        syscall_handler.cheatnet_state,
         syscall_handler.syscall_handler.resources,
         syscall_handler.syscall_handler.context,
     )?;

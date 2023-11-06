@@ -21,7 +21,7 @@ pub struct Deploy {
     pub class_hash: FieldElement,
 
     /// Calldata for the contract constructor
-    #[clap(short, long, value_delimiter = ' ')]
+    #[clap(short, long, value_delimiter = ' ', num_args = 1..)]
     pub constructor_calldata: Vec<FieldElement>,
 
     /// Salt for the address
@@ -49,7 +49,7 @@ pub async fn deploy(
     let salt = extract_or_generate_salt(salt);
 
     let factory = ContractFactory::new(class_hash, account);
-    let deployment = factory.deploy(&constructor_calldata, salt, unique);
+    let deployment = factory.deploy(constructor_calldata.clone(), salt, unique);
 
     let execution = if let Some(max_fee) = max_fee {
         deployment.max_fee(max_fee)

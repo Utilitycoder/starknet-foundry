@@ -19,7 +19,7 @@ pub struct Call {
     pub function: String,
 
     /// Arguments of the called function (list of hex)
-    #[clap(short, long, value_delimiter = ' ')]
+    #[clap(short, long, value_delimiter = ' ', num_args = 1..)]
     pub calldata: Vec<FieldElement>,
 
     /// Block identifier on which call should be performed.
@@ -47,11 +47,14 @@ pub async fn call(
 
     match res {
         Ok(res) => {
-            let response: String = res.iter().map(|item| format!("{item:#x}, ")).collect();
+            let response: String = res
+                .iter()
+                .map(|item| format!("{item:#x}"))
+                .collect::<Vec<String>>()
+                .join(", ");
+
             Ok(CallResponse {
-                response: "[".to_string()
-                    + response.trim_end_matches(|c| c == ' ' || c == ',')
-                    + "]",
+                response: format!("[{response}]"),
             })
         }
         Err(error) => handle_rpc_error(error),

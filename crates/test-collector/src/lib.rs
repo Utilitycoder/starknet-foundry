@@ -4,11 +4,12 @@ use cairo_felt::Felt252;
 use cairo_lang_compiler::db::RootDatabase;
 use cairo_lang_compiler::diagnostics::DiagnosticsReporter;
 use cairo_lang_debug::DebugWithDb;
-use cairo_lang_defs::ids::{FreeFunctionId, FunctionWithBodyId, ModuleItemId};
+use cairo_lang_defs::db::DefsGroup;
+use cairo_lang_defs::ids::{FreeFunctionId, FunctionWithBodyId, ModuleId, ModuleItemId};
 use cairo_lang_defs::plugin::PluginDiagnostic;
 use cairo_lang_diagnostics::ToOption;
 use cairo_lang_filesystem::cfg::{Cfg, CfgSet};
-use cairo_lang_filesystem::db::FilesGroup;
+use cairo_lang_filesystem::db::{AsFilesGroupMut, FilesGroup, FilesGroupEx};
 use cairo_lang_filesystem::ids::{CrateId, CrateLongId, Directory};
 use cairo_lang_lowering::ids::ConcreteFunctionWithBodyId;
 use cairo_lang_project::{ProjectConfig, ProjectConfigContent};
@@ -30,12 +31,13 @@ use cairo_lang_utils::ordered_hash_map::OrderedHashMap;
 use cairo_lang_utils::OptionHelper;
 use conversions::StarknetConversions;
 use itertools::Itertools;
+use num_bigint::BigInt;
 use num_traits::ToPrimitive;
 use plugin::TestPlugin;
 use smol_str::SmolStr;
 use starknet::core::types::{BlockId, BlockTag};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 mod plugin;
@@ -60,10 +62,26 @@ pub enum ExpectedTestResult {
     Panics(ExpectedPanicValue),
 }
 
+pub trait ForkConfig {}
+
+impl ForkConfig for RawForkConfig {}
+
 #[derive(Debug, Clone, PartialEq)]
-pub enum ForkConfig {
+pub enum RawForkConfig {
     Id(String),
-    Params(String, BlockId),
+    Params(RawForkParams),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RawForkParams {
+    pub url: String,
+    pub block_id: BlockId,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FuzzerConfig {
+    pub fuzzer_runs: u32,
+    pub fuzzer_seed: u64,
 }
 
 /// The configuration for running a single test.
@@ -76,7 +94,9 @@ pub struct SingleTestConfig {
     /// Should the test be ignored.
     pub ignored: bool,
     /// The configuration of forked network.
-    pub fork_config: Option<ForkConfig>,
+    pub fork_config: Option<RawForkConfig>,
+    /// Custom fuzzing configuration
+    pub fuzzer_config: Option<FuzzerConfig>,
 }
 
 /// Finds the tests in the requested crates.
@@ -121,6 +141,7 @@ pub fn try_extract_test_config(
         .find(|attr| attr.id.as_str() == "available_gas");
     let should_panic_attr = attrs.iter().find(|attr| attr.id.as_str() == "should_panic");
     let fork_attr = attrs.iter().find(|attr| attr.id.as_str() == "fork");
+    let fuzzer_attr = attrs.iter().find(|attr| attr.id.as_str() == "fuzzer");
     let mut diagnostics = vec![];
     if let Some(attr) = test_attr {
         if !attr.args.is_empty() {
@@ -135,6 +156,7 @@ pub fn try_extract_test_config(
             available_gas_attr,
             should_panic_attr,
             fork_attr,
+            fuzzer_attr,
         ]
         .into_iter()
         .flatten()
@@ -212,6 +234,17 @@ pub fn try_extract_test_config(
     } else {
         None
     };
+    let fuzzer_config = if let Some(attr) = fuzzer_attr {
+        extract_fuzzer_config(db, attr).on_none(|| {
+            diagnostics.push(PluginDiagnostic {
+                stable_ptr: attr.args_stable_ptr.untyped(),
+                message: "Expected fuzzer config must be of the form `runs: <u32>, seed: <u64>`"
+                    .into(),
+            });
+        })
+    } else {
+        None
+    };
 
     if !diagnostics.is_empty() {
         return Err(diagnostics);
@@ -232,6 +265,7 @@ pub fn try_extract_test_config(
             },
             ignored,
             fork_config,
+            fuzzer_config,
         })
     })
 }
@@ -273,7 +307,7 @@ fn extract_panic_values(db: &dyn SyntaxGroup, attr: &Attribute) -> Option<Vec<Fe
 }
 
 /// Tries to extract the fork configuration.
-fn extract_fork_config(db: &dyn SyntaxGroup, attr: &Attribute) -> Option<ForkConfig> {
+fn extract_fork_config(db: &dyn SyntaxGroup, attr: &Attribute) -> Option<RawForkConfig> {
     if attr.args.is_empty() {
         return None;
     }
@@ -286,16 +320,59 @@ fn extract_fork_config(db: &dyn SyntaxGroup, attr: &Attribute) -> Option<ForkCon
     }
 }
 
-fn extract_fork_config_from_id(id: &ast::Expr, db: &dyn SyntaxGroup) -> Option<ForkConfig> {
-    let ast::Expr::String(url_str) = id else {
+fn extract_fuzzer_config(db: &dyn SyntaxGroup, attr: &Attribute) -> Option<FuzzerConfig> {
+    let [AttributeArg {
+        variant:
+            AttributeArgVariant::Named {
+                name: fuzzer_runs_name,
+                value: fuzzer_runs,
+                ..
+            },
+        ..
+    }, AttributeArg {
+        variant:
+            AttributeArgVariant::Named {
+                name: fuzzer_seed_name,
+                value: fuzzer_seed,
+                ..
+            },
+        ..
+    }] = &attr.args[..]
+    else {
         return None;
     };
-    let url = url_str.string_value(db)?;
 
-    Some(ForkConfig::Id(url))
+    if fuzzer_runs_name != "runs" || fuzzer_seed_name != "seed" {
+        return None;
+    };
+
+    let fuzzer_runs = extract_numeric_value(db, fuzzer_runs)?.to_u32()?;
+    let fuzzer_seed = extract_numeric_value(db, fuzzer_seed)?.to_u64()?;
+
+    Some(FuzzerConfig {
+        fuzzer_runs,
+        fuzzer_seed,
+    })
 }
 
-fn extract_fork_config_from_args(db: &dyn SyntaxGroup, attr: &Attribute) -> Option<ForkConfig> {
+fn extract_numeric_value(db: &dyn SyntaxGroup, expr: &ast::Expr) -> Option<BigInt> {
+    let ast::Expr::Literal(literal) = expr else {
+        return None;
+    };
+
+    literal.numeric_value(db)
+}
+
+fn extract_fork_config_from_id(id: &ast::Expr, db: &dyn SyntaxGroup) -> Option<RawForkConfig> {
+    let ast::Expr::String(id_str) = id else {
+        return None;
+    };
+    let id = id_str.string_value(db)?;
+
+    Some(RawForkConfig::Id(id))
+}
+
+fn extract_fork_config_from_args(db: &dyn SyntaxGroup, attr: &Attribute) -> Option<RawForkConfig> {
     let [AttributeArg {
         variant:
             AttributeArgVariant::Named {
@@ -380,7 +457,10 @@ fn extract_fork_config_from_args(db: &dyn SyntaxGroup, attr: &Attribute) -> Opti
         return None;
     }
 
-    Some(ForkConfig::Params(url, block_id[0].unwrap()))
+    Some(RawForkConfig::Params(RawForkParams {
+        url,
+        block_id: block_id[0].unwrap(),
+    }))
 }
 
 /// Represents a dependency of a Cairo project
@@ -390,28 +470,32 @@ pub struct LinkedLibrary {
     pub path: PathBuf,
 }
 
+pub type TestCaseRaw = TestCase<RawForkConfig>;
+
 #[derive(Debug, PartialEq, Clone)]
-pub struct TestCase {
+pub struct TestCase<T: ForkConfig> {
     pub name: String,
     pub available_gas: Option<usize>,
+    pub ignored: bool,
     pub expected_result: ExpectedTestResult,
-    pub fork_config: Option<ForkConfig>,
+    pub fork_config: Option<T>,
+    pub fuzzer_config: Option<FuzzerConfig>,
 }
 
 pub fn collect_tests(
-    crate_root: &str,
-    output_path: Option<&str>,
     crate_name: &str,
+    crate_root: &Path,
+    lib_content: &str,
     linked_libraries: &[LinkedLibrary],
-    builtins: Option<Vec<&str>>,
+    builtins: &[&str],
     corelib_path: PathBuf,
-) -> Result<(Program, Vec<TestCase>)> {
-    let mut crate_roots: OrderedHashMap<SmolStr, PathBuf> = linked_libraries
+    output_path: Option<&str>,
+) -> Result<(Program, Vec<TestCaseRaw>)> {
+    let crate_roots: OrderedHashMap<SmolStr, PathBuf> = linked_libraries
         .iter()
         .cloned()
-        .map(|source_root| (source_root.name.into(), source_root.path.clone()))
+        .map(|source_root| (source_root.name.into(), source_root.path))
         .collect();
-    crate_roots.insert(crate_name.into(), PathBuf::from(crate_root));
 
     let project_config = ProjectConfig {
         base_path: crate_root.into(),
@@ -430,7 +514,8 @@ pub fn collect_tests(
         b.build()?
     };
 
-    let main_crate_id = db.intern_crate(CrateLongId::Real(SmolStr::from(crate_name)));
+    let main_crate_id =
+        insert_lib_entrypoint_content_into_db(db, crate_name, crate_root, lib_content);
 
     if DiagnosticsReporter::stderr().check(db) {
         return Err(anyhow!(
@@ -453,7 +538,7 @@ pub fn collect_tests(
         .context("Compilation failed without any diagnostics")
         .context("Failed to get sierra program")?;
 
-    let collected_tests: Vec<TestCase> = all_tests
+    let collected_tests: Vec<TestCaseRaw> = all_tests
         .into_iter()
         .map(|(func_id, test)| {
             (
@@ -475,18 +560,16 @@ pub fn collect_tests(
         .map(|(test_name, config)| TestCase {
             name: test_name,
             available_gas: config.available_gas,
+            ignored: config.ignored,
             expected_result: config.expected_result,
             fork_config: config.fork_config,
+            fuzzer_config: config.fuzzer_config,
         })
         .collect();
 
     let sierra_program = replace_sierra_ids_in_program(db, &sierra_program);
 
-    let builtins = builtins.map_or_else(Vec::new, |builtins| {
-        builtins.iter().map(|s| (*s).to_string()).collect()
-    });
-
-    validate_tests(sierra_program.clone(), &collected_tests, &builtins)?;
+    validate_tests(sierra_program.clone(), &collected_tests, builtins)?;
 
     if let Some(path) = output_path {
         fs::write(path, sierra_program.to_string()).context("Failed to write output")?;
@@ -494,10 +577,31 @@ pub fn collect_tests(
     Ok((sierra_program, collected_tests))
 }
 
+// inspired with cairo-lang-compiler/src/project.rs:49 (part of setup_single_project_file)
+fn insert_lib_entrypoint_content_into_db(
+    db: &mut RootDatabase,
+    crate_name: &str,
+    crate_root: &Path,
+    lib_content: &str,
+) -> CrateId {
+    let main_crate_id = db.intern_crate(CrateLongId::Real(SmolStr::from(crate_name)));
+    db.set_crate_root(
+        main_crate_id,
+        Some(Directory::Real(crate_root.to_path_buf())),
+    );
+
+    let module_id = ModuleId::CrateRoot(main_crate_id);
+    let file_id = db.module_main_file(module_id).unwrap();
+    db.as_files_group_mut()
+        .override_file_content(file_id, Some(Arc::new(lib_content.to_string())));
+
+    main_crate_id
+}
+
 fn validate_tests(
     sierra_program: Program,
-    collected_tests: &Vec<TestCase>,
-    ignored_params: &[String],
+    collected_tests: &Vec<TestCaseRaw>,
+    ignored_params: &[&str],
 ) -> Result<(), anyhow::Error> {
     let casm_generator = match SierraCasmGenerator::new(sierra_program) {
         Ok(casm_generator) => casm_generator,
@@ -508,7 +612,7 @@ fn validate_tests(
         let mut filtered_params: Vec<String> = Vec::new();
         for param in &func.params {
             let param_str = &param.ty.debug_name.as_ref().unwrap().to_string();
-            if !ignored_params.contains(param_str) {
+            if !ignored_params.contains(&param_str.as_str()) {
                 filtered_params.push(param_str.to_string());
             }
         }
@@ -527,7 +631,10 @@ fn validate_tests(
         }
         if let Some(return_type_name) = maybe_return_type_name {
             if !return_type_name.starts_with("core::panics::PanicResult::") {
-                anyhow::bail!("Test function {} must be panicable but it's not", test.name);
+                anyhow::bail!(
+                    "The test function {} always succeeds and cannot be used as a test. Make sure to include panickable statements such as `assert` in your test",
+                    test.name
+                );
             }
             if return_type_name != "core::panics::PanicResult::<((),)>" {
                 anyhow::bail!(
@@ -539,8 +646,8 @@ fn validate_tests(
             }
         } else {
             anyhow::bail!(
-                "Couldn't read result type for test function {} possible cause: Test function {} \
-                 must be panicable but it's not",
+                "Couldn't read result type for test function {} possible cause: The test function {} \
+                 always succeeds and cannot be used as a test. Make sure to include panickable statements such as `assert` in your test",
                 test.name,
                 test.name
             );
