@@ -1040,7 +1040,7 @@ dependencies = [
  "serde_json",
  "shellexpand",
  "snapbox",
- "starknet 0.4.0",
+ "starknet",
  "tempfile",
  "test-case",
  "tokio",
@@ -1091,7 +1091,7 @@ dependencies = [
  "scarb-metadata",
  "serde",
  "serde_json",
- "starknet 0.4.0",
+ "starknet",
  "starknet_api",
  "tempfile",
  "test-case",
@@ -1342,7 +1342,7 @@ dependencies = [
  "criterion-plot",
  "is-terminal",
  "itertools 0.10.5",
- "num-traits 0.2.16",
+ "num-traits 0.2.17",
  "once_cell",
  "oorandom",
  "plotters",
@@ -1877,7 +1877,7 @@ dependencies = [
  "serde_json",
  "smol_str",
  "snapbox",
- "starknet 0.5.0",
+ "starknet",
  "starknet_api",
  "tempfile",
  "test-collector",
@@ -3134,7 +3134,7 @@ version = "0.3.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d2c224ba00d7cadd4d5c660deaf2098e5e80e07846537c51f9cfa4be50c1fd45"
 dependencies = [
- "num-traits 0.2.16",
+ "num-traits 0.2.17",
  "plotters-backend",
  "plotters-svg",
  "wasm-bindgen",
@@ -4085,24 +4085,8 @@ dependencies = [
  "starknet-crypto 0.6.0",
  "starknet-ff",
  "starknet-macros",
- "starknet-providers 0.4.1",
- "starknet-signers 0.2.2",
-]
-
-[[package]]
-name = "starknet"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8fcb61961b91757a9bc2d11549067445b2f921bd957f53710db35449767a1ba3"
-dependencies = [
- "starknet-accounts 0.4.0",
- "starknet-contract 0.4.0",
- "starknet-core 0.5.1",
- "starknet-crypto 0.6.0",
- "starknet-ff",
- "starknet-macros",
- "starknet-providers 0.5.0",
- "starknet-signers 0.3.0",
+ "starknet-providers",
+ "starknet-signers",
 ]
 
 [[package]]
@@ -4278,22 +4262,6 @@ dependencies = [
  "eth-keystore",
  "rand",
  "starknet-core",
- "starknet-crypto 0.6.0",
- "thiserror",
-]
-
-[[package]]
-name = "starknet-signers"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5313524cc79344015ef2a8618947332ab17012b5c50600c7f84c60989bdec980"
-dependencies = [
- "async-trait",
- "auto_impl",
- "crypto-bigint",
- "eth-keystore",
- "rand",
- "starknet-core 0.5.1",
  "starknet-crypto 0.6.0",
  "thiserror",
 ]
