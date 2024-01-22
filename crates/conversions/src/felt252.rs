@@ -1,44 +1,63 @@
-use super::StarknetConversions;
-use blockifier::execution::execution_utils::felt_to_stark_felt;
-use cairo_felt::Felt252;
-use cairo_lang_runner::short_string::as_cairo_short_string;
+use crate::{FromConv, TryFromConv};
+use blockifier::execution::execution_utils::stark_felt_to_felt;
+use cairo_felt::{Felt252, ParseFeltError};
+use num_traits::Num;
 use starknet::core::types::FieldElement;
 use starknet_api::core::Nonce;
 use starknet_api::{
-    core::{ClassHash, ContractAddress, PatriciaKey},
-    hash::{StarkFelt, StarkHash},
+    core::{ClassHash, ContractAddress},
+    hash::StarkFelt,
 };
 
-impl StarknetConversions for Felt252 {
-    fn to_felt252(&self) -> Felt252 {
-        self.clone()
+impl FromConv<FieldElement> for Felt252 {
+    fn from_(value: FieldElement) -> Felt252 {
+        Felt252::from_bytes_be(&value.to_bytes_be())
     }
+}
 
-    fn to_field_element(&self) -> FieldElement {
-        FieldElement::from_bytes_be(&self.to_be_bytes()).unwrap()
+impl FromConv<StarkFelt> for Felt252 {
+    fn from_(value: StarkFelt) -> Felt252 {
+        stark_felt_to_felt(value)
     }
+}
 
-    fn to_stark_felt(&self) -> StarkFelt {
-        felt_to_stark_felt(self)
+impl FromConv<ClassHash> for Felt252 {
+    fn from_(value: ClassHash) -> Felt252 {
+        Felt252::from_bytes_be(value.0.bytes())
     }
+}
 
-    fn to_stark_hash(&self) -> StarkHash {
-        StarkHash::new(self.to_be_bytes()).unwrap()
+impl FromConv<ContractAddress> for Felt252 {
+    fn from_(value: ContractAddress) -> Felt252 {
+        stark_felt_to_felt(*value.0.key())
     }
+}
 
-    fn to_class_hash(&self) -> ClassHash {
-        ClassHash(self.to_stark_felt())
+impl FromConv<Nonce> for Felt252 {
+    fn from_(value: Nonce) -> Felt252 {
+        stark_felt_to_felt(value.0)
     }
+}
 
-    fn to_contract_address(&self) -> ContractAddress {
-        ContractAddress(PatriciaKey::try_from(self.to_stark_felt()).unwrap())
+impl TryFromConv<String> for Felt252 {
+    type Error = ParseFeltError;
+
+    /// Parse decimal felt
+    fn try_from_(value: String) -> Result<Felt252, Self::Error> {
+        Felt252::from_str_radix(&value, 10)
     }
+}
 
-    fn to_short_string(&self) -> String {
-        as_cairo_short_string(self).expect("Conversion to short string failed")
-    }
+pub trait FromShortString<T>: Sized {
+    fn from_short_string(short_string: &str) -> Result<T, ParseFeltError>;
+}
 
-    fn to_nonce(&self) -> Nonce {
-        Nonce(self.to_stark_felt())
+impl FromShortString<Felt252> for Felt252 {
+    fn from_short_string(short_string: &str) -> Result<Felt252, ParseFeltError> {
+        if short_string.len() <= 31 && short_string.is_ascii() {
+            Ok(Felt252::from_bytes_be(short_string.as_bytes()))
+        } else {
+            Err(ParseFeltError)
+        }
     }
 }

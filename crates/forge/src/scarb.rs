@@ -1,7 +1,11 @@
 use scarb_metadata::{Metadata, PackageId};
 
-use crate::scarb::config::{validate_raw_fork_config, ForgeConfig};
+use crate::compiled_raw::CompiledTestCrateRaw;
+use crate::scarb::config::{ForgeConfig, RawForgeConfig};
 use anyhow::{anyhow, Context, Result};
+use camino::Utf8Path;
+use scarb_api::ScarbCommand;
+use scarb_ui::args::PackagesFilter;
 
 pub mod config;
 
@@ -20,32 +24,61 @@ pub fn config_from_scarb_for_package(
         .ok_or_else(|| anyhow!("Failed to find metadata for package = {package}"))?
         .tool_metadata("snforge");
     let raw_config = if let Some(raw_metadata) = maybe_raw_metadata {
-        serde_json::from_value(raw_metadata.clone())?
+        serde_json::from_value::<RawForgeConfig>(raw_metadata.clone())?
     } else {
         Default::default()
     };
 
-    validate_raw_fork_config(&raw_config).context("Invalid config in Scarb.toml: ")?;
-    raw_config.try_into()
+    raw_config
+        .try_into()
+        .context("Invalid config in Scarb.toml: ")
+}
+
+pub fn build_contracts_with_scarb(filter: PackagesFilter) -> Result<()> {
+    ScarbCommand::new_with_stdio()
+        .arg("build")
+        .packages_filter(filter)
+        .run()
+        .context("Failed to build contracts with Scarb")?;
+    Ok(())
+}
+
+pub fn build_test_artifacts_with_scarb(filter: PackagesFilter) -> Result<()> {
+    ScarbCommand::new_with_stdio()
+        .arg("snforge-test-collector")
+        .packages_filter(filter)
+        .run()
+        .context("Failed to build test artifacts with Scarb")?;
+    Ok(())
+}
+
+pub(crate) fn load_test_artifacts(
+    snforge_target_dir_path: &Utf8Path,
+    package_name: &str,
+) -> Result<Vec<CompiledTestCrateRaw>> {
+    let snforge_test_artifact_path =
+        snforge_target_dir_path.join(format!("{package_name}.snforge_sierra.json"));
+    let test_crates = serde_json::from_str::<Vec<CompiledTestCrateRaw>>(&std::fs::read_to_string(
+        snforge_test_artifact_path,
+    )?)?;
+    Ok(test_crates)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::compiled_raw::RawForkParams;
     use crate::scarb::config::ForkTarget;
     use assert_fs::fixture::{FileWriteStr, PathChild, PathCopy};
     use assert_fs::TempDir;
     use camino::Utf8PathBuf;
-    use conversions::StarknetConversions;
     use indoc::{formatdoc, indoc};
     use scarb_metadata::MetadataCommand;
-    use starknet::core::types::BlockId;
-    use starknet::core::types::BlockTag::Latest;
     use std::str::FromStr;
-    use test_collector::RawForkParams;
+    use test_utils::tempdir_with_tool_versions;
 
     fn setup_package(package_name: &str) -> TempDir {
-        let temp = TempDir::new().unwrap();
+        let temp = tempdir_with_tool_versions().unwrap();
         temp.copy_from(
             format!("tests/data/{package_name}"),
             &["**/*.cairo", "**/*.toml"],
@@ -72,7 +105,7 @@ mod tests {
                 casm = true
 
                 [dependencies]
-                starknet = "2.3.0"
+                starknet = "2.4.0"
                 snforge_std = {{ path = "{}" }}
 
                 [[tool.snforge.fork]]
@@ -116,27 +149,30 @@ mod tests {
             ForgeConfig {
                 exit_first: false,
                 fork: vec![
-                    ForkTarget {
-                        name: "FIRST_FORK_NAME".to_string(),
-                        params: RawForkParams {
+                    ForkTarget::new(
+                        "FIRST_FORK_NAME".to_string(),
+                        RawForkParams {
                             url: "http://some.rpc.url".to_string(),
-                            block_id: BlockId::Number(1)
+                            block_id_type: "number".to_string(),
+                            block_id_value: "1".to_string(),
                         },
-                    },
-                    ForkTarget {
-                        name: "SECOND_FORK_NAME".to_string(),
-                        params: RawForkParams {
+                    ),
+                    ForkTarget::new(
+                        "SECOND_FORK_NAME".to_string(),
+                        RawForkParams {
                             url: "http://some.rpc.url".to_string(),
-                            block_id: BlockId::Hash("1".to_string().to_field_element())
+                            block_id_type: "hash".to_string(),
+                            block_id_value: "1".to_string(),
                         },
-                    },
-                    ForkTarget {
-                        name: "THIRD_FORK_NAME".to_string(),
-                        params: RawForkParams {
+                    ),
+                    ForkTarget::new(
+                        "THIRD_FORK_NAME".to_string(),
+                        RawForkParams {
                             url: "http://some.rpc.url".to_string(),
-                            block_id: BlockId::Tag(Latest)
+                            block_id_type: "tag".to_string(),
+                            block_id_value: "Latest".to_string(),
                         },
-                    }
+                    )
                 ],
                 fuzzer_runs: None,
                 fuzzer_seed: None,
@@ -279,7 +315,7 @@ mod tests {
             config_from_scarb_for_package(&scarb_metadata, &scarb_metadata.workspace.members[0])
                 .unwrap_err();
         assert!(
-            format!("{err:?}").contains("block_id = wrong_variant is not valid. Possible values = are \"number\", \"hash\" and \"tag\"")
+            format!("{err:?}").contains("block_id = wrong_variant is not valid. Possible values are = \"number\", \"hash\" and \"tag\"")
         );
     }
 

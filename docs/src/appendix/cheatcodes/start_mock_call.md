@@ -12,7 +12,7 @@ An address with no contract can be mocked as well. Mock can be canceled with [`s
 - `ret_data` - data to return by the function `function_name`
 
 > 📝 **Note**
-> Mocks do not have any effect on function calls withing the contract itself.
+> Mocks do not have any effect on function calls within the contract itself.
 > E.g. for a function within a contract defined like this:
 >
 > ```rust
@@ -27,7 +27,7 @@ For contract implementation:
 
 ```rust
 // ...
-#[external(v0)]
+#[abi(embed_v0)]
 impl IContractImpl of IContract<ContractState> {
     #[storage]
     struct Storage {
@@ -65,7 +65,7 @@ fn test_mock_call() {
 }
 ```
 
-## Mocking non-existent functions
+## Mocking Non-existent Functions
 
 It is also possible to simulate contract having a specific method by mocking a non-existent selector.
 
@@ -87,7 +87,7 @@ impl IOtherContract<TContractState> {
     fn function_not_actually_implemented(self: @TContractState) -> felt252;
 }
 
-#[external(v0)]
+#[abi(embed_v0)]
 impl IContractImpl of IContract<ContractState> {
     fn call_not_actually_implemented(self: @ContractState) -> felt252 {
         // ...

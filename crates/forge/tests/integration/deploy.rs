@@ -8,13 +8,13 @@ use test_utils::{assert_passed, test_case};
 fn error_handling() {
     let test = test_case!(
         indoc!(
-            r#"
+            r"
         use result::ResultTrait;
         use snforge_std::{ declare, ContractClass, ContractClassTrait };
         use array::ArrayTrait;
 
         #[test]
-        fn test_deploy_error_handling() {
+        fn error_handling() {
             let contract = declare('PanickingConstructor');
 
             match contract.deploy(@ArrayTrait::new()) {
@@ -25,7 +25,7 @@ fn error_handling() {
                 }
             }
         }
-    "#
+    "
         ),
         Contract::from_code_path(
             "PanickingConstructor".to_string(),
@@ -40,10 +40,10 @@ fn error_handling() {
 }
 
 #[test]
-fn deploy_syscall() {
+fn deploy_syscall_check() {
     let test = test_case!(
         indoc!(
-            r#"
+            r"
         use snforge_std::{declare, test_address};
         use starknet::{SyscallResult, deploy_syscall};
         
@@ -54,22 +54,22 @@ fn deploy_syscall() {
         }
 
         #[test]
-        fn test_deploy_syscall() {
+        fn deploy_syscall_check() {
             let contract = declare('DeployChecker');
             let salt = 1;
             let calldata = array![10];
         
             let (contract_address, span) = deploy_syscall(contract.class_hash, salt, calldata.span(), false).unwrap();
-            assert(*span[0] == test_address().into() && *span[1] == 10, 'constructor return missmatch');
+            assert(*span[0] == test_address().into() && *span[1] == 10, 'constructor return mismatch');
             
             let dispatcher = IDeployCheckerDispatcher { contract_address };
-            assert(dispatcher.get_balance() == 10, 'balance missmatch');
-            assert(dispatcher.get_caller() == test_address(), 'caller missmatch');
+            assert(dispatcher.get_balance() == 10, 'balance mismatch');
+            assert(dispatcher.get_caller() == test_address(), 'caller mismatch');
 
-            let (contract_address_from_zero, span) = deploy_syscall(contract.class_hash, salt, calldata.span(), true).unwrap();
+            let (contract_address_from_zero, _) = deploy_syscall(contract.class_hash, salt, calldata.span(), true).unwrap();
             assert(contract_address != contract_address_from_zero, 'deploy from zero no effect');
         }
-    "#
+    "
         ),
         Contract::from_code_path(
             "DeployChecker".to_string(),

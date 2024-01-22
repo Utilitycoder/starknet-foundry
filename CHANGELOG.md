@@ -7,11 +7,135 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Forge
+
+#### Added
+
+- `store` and `load` cheatcodes
+
+#### Fixed
+
+- Error message for tests that should panic but pass
+
+## [0.14.0] - 2024-01-11
+
+### Forge
+
+#### Added
+
+- `Secp256k1` and `Secp256r1` curves support for `KeyPair` in `snforge_std`
+
+#### Changed
+
+- maximum number of computational steps per call set to current Starknet limit (3M)
+- `mean` and `std deviation` fields are displayed for gas usage while running fuzzing tests 
+- Cairo edition in `snforge_std` and `sncast_std` set to `2023_10`
+- `snforge_std::signature` module with `stark_curve`, `secp256k1_curve` and `secp256r1_curve` submodules
+
+#### Fixed
+
+- Safe library dispatchers in test code no longer propagate errors when not intended to
+
+## [0.13.1] - 2023-12-20
+
+### Forge
+
+#### Added
+
+- `assert_not_emitted` assert to check if an event was not emitted
+
+#### Changed 
+
+- fields from `starknet::info::v2::TxInfo` are now part of `TxInfoMock` from `snforge_std::cheatcodes::tx_info`
+- consistent latest block numbers for each url are now used across the whole run when testing against forks
+
+#### Fixed
+
+- Parsing panic data from call contract result
+
+### Cast
+
+#### Added 
+
+- add support for sepolia network
+- `--yes` option to `account delete` command that allows to skip confirmation prompt
+
+#### Changed
+
+- Argument `max-fee` in `account deploy` is now optional
+
+## [0.13.0] - 2023-12-14
+
+### Forge
+
+#### Changed
+
+- Bump cairo to 2.4.0.
+- Migrated test compilation and collection to Scarb, snforge should now be compatible with every Scarb version >= 2.4.0 unless breaking changes happen
+
+## [0.12.0] - 2023-12-06
+
+### Forge
+
+#### Added
+
+- print gas usage for each test
+- Support for test collector built-in in Scarb with the `--use-scarb-collector` flag. Requires at least `nightly-2023-12-04` version of Scarb.
+
+### Cast
+
+#### Added
+
+- `--wait-timeout` to set timeout for waiting for tx on network using `--wait` flag (default 60s)
+- `--wait-retry-interval` to adjust the time between consecutive attempts to fetch tx from network using `--wait` flag (default 5s)
+- allow setting nonce in declare, deploy and invoke (using `--nonce` and in deployment scripts)
+- add `get_nonce` function to cast_std
+- `--private-key-file` option to `account add` command that allows to provide a path to the file holding account private key
+
+## [0.11.0] - 2023-11-22
+
+### Forge
+
+#### Added
+
+- `elect` cheatcode for mocking the sequencer address. Read more [here](./docs/src/appendix/cheatcodes/start_elect.md).
+- `--rerun-failed` option to run tests that failed during the last run.
+
+#### Changed
+- `start_warp` and `stop_warp` now take `CheatTarget` as the first argument instead of `ContractAddress`. Read more [here](./docs/src/appendix/cheatcodes/start_warp.md). 
+- `start_prank` and `stop_prank` now take `CheatTarget` as the first argument instead of `ContractAddress`. Read more [here](./docs/src/appendix/cheatcodes/start_prank.md).
+- `start_roll` and `stop_roll` now take `CheatTarget` as the first argument instead of `ContractAddress`. Read more [here](./docs/src/appendix/cheatcodes/start_roll.md).
+
+PS: Credits to @bllu404 for the help with the new interfaces for cheats!
+
+#### Fixed
+
+- using unsupported `available_gas` attribute now fails the specific test case instead of the whole runner
+
+### Cast
+
+### Added
+
+- MVP for cairo deployment scripts with declare, deploy, invoke and call
+
+## [0.10.2] - 2023-11-13
+
+### Forge
+
+#### Changed
+
+- Bump cairo to 2.3.1
+
+#### Removed
+
+- `available_gas` attribute, it didn't compute correctly gas usage. Contract functions execution cost would not be included.
+
 ## [0.10.1] - 2023-11-09
 
 ### Cast
 
 #### Fixed
+
 - scarb metadata in declare subcommand now takes manifest path from cli if passed instead of looking for it
 
 ## [0.10.0] - 2023-11-08
@@ -65,7 +189,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - tests in `src` folder now have to be in a module annotated with `#[cfg(test)]`
 - `snforge_std::PrintTrait` will not convert values representing ASCII control characters to strings
 - separated `snforge` to subcommands: `snforge test`, `snforge init` and `snforge clean-cache`. 
-Read more [here](https://foundry-rs.github.io/starknet-foundry/appendix/forge.html).
+Read more [here](https://foundry-rs.github.io/starknet-foundry/appendix/snforge.html).
 - `starknet::get_block_info` now returns correct block info in a forked block
 
 ### Cast
@@ -141,7 +265,7 @@ from now on the only officially supported cairo compiler version is 2
 
 - `var` library function for reading environmental variables
 
-### Fixed
+#### Fixed
 - Using any concrete `block_id` when using forking mode, would lead to crashes 
 
 ## [0.7.0] - 2023-09-27
@@ -183,7 +307,7 @@ from now on the only officially supported cairo compiler version is 2
 - printing failures summary at the end of an execution
 - filtering tests now uses an absolute module tree path — it is possible to filter tests by module names, etc.
 
-### Fixed
+#### Fixed
 
 - non-zero exit code is returned when any tests fail
 - mock_call works with dispatchers if contract does not exists

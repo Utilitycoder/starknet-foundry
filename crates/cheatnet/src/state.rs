@@ -1,31 +1,43 @@
-use crate::cheatcodes;
-use crate::cheatcodes::spy_events::{Event, SpyTarget};
-use crate::constants::TEST_SEQUENCER_ADDRESS;
 use crate::forking::state::ForkStateReader;
+use crate::runtime_extensions::call_to_blockifier_runtime_extension::rpc::UsedResources;
+use crate::runtime_extensions::forge_runtime_extension::cheatcodes::spoof::TxInfoMock;
+use crate::runtime_extensions::forge_runtime_extension::cheatcodes::spy_events::{
+    Event, SpyTarget,
+};
+use blockifier::execution::entry_point::CallEntryPoint;
 use blockifier::state::state_api::State;
 use blockifier::{
     execution::contract_class::ContractClass,
     state::{
-        cached_state::ContractStorageKey,
         errors::StateError,
         state_api::{StateReader, StateResult},
     },
 };
 use cairo_felt::Felt252;
-use cheatcodes::spoof::TxInfoMock;
-use serde::{Deserialize, Serialize};
-use starknet_api::block::{BlockNumber, BlockTimestamp};
+use runtime::starknet::context::BlockInfo;
+use runtime::starknet::state::DictStateReader;
+
 use starknet_api::core::EntryPointSelector;
-use starknet_api::core::PatriciaKey;
-use starknet_api::hash::StarkHash;
+
+use crate::constants::build_test_entry_point;
 use starknet_api::transaction::ContractAddressSalt;
 use starknet_api::{
     core::{ClassHash, CompiledClassHash, ContractAddress, Nonce},
     hash::StarkFelt,
-    patricia_key,
     state::StorageKey,
 };
+use std::cell::{Ref, RefCell};
 use std::collections::HashMap;
+use std::hash::BuildHasher;
+use std::rc::Rc;
+
+// Specifies which contracts to target
+// with a cheatcode function
+pub enum CheatTarget {
+    All,
+    One(ContractAddress),
+    Multiple(Vec<ContractAddress>),
+}
 
 #[derive(Debug)]
 pub struct ExtendedStateReader {
@@ -34,39 +46,21 @@ pub struct ExtendedStateReader {
 }
 
 pub trait BlockInfoReader {
-    fn get_block_info(&mut self) -> StateResult<CheatnetBlockInfo>;
+    fn get_block_info(&mut self) -> StateResult<BlockInfo>;
 }
 
 impl BlockInfoReader for ExtendedStateReader {
-    fn get_block_info(&mut self) -> StateResult<CheatnetBlockInfo> {
+    fn get_block_info(&mut self) -> StateResult<BlockInfo> {
         if let Some(ref mut fork_state_reader) = self.fork_state_reader {
             return fork_state_reader.get_block_info();
         }
 
-        Ok(CheatnetBlockInfo::default())
+        Ok(BlockInfo::default())
     }
 }
 
-#[allow(clippy::module_name_repetitions)]
 pub struct BlockifierState<'a> {
     pub blockifier_state: &'a mut dyn State,
-}
-
-#[derive(Copy, Clone, Serialize, Deserialize, Debug)]
-pub struct CheatnetBlockInfo {
-    pub block_number: BlockNumber,
-    pub timestamp: BlockTimestamp,
-    pub sequencer_address: ContractAddress,
-}
-
-impl Default for CheatnetBlockInfo {
-    fn default() -> Self {
-        Self {
-            block_number: BlockNumber(2000),
-            timestamp: BlockTimestamp::default(),
-            sequencer_address: ContractAddress(patricia_key!(TEST_SEQUENCER_ADDRESS)),
-        }
-    }
 }
 
 impl<'a> BlockifierState<'a> {
@@ -140,80 +134,100 @@ impl StateReader for ExtendedStateReader {
     }
 }
 
-/// A simple implementation of `StateReader` using `HashMap`s as storage.
-#[derive(Debug, Default)]
-pub struct DictStateReader {
-    pub storage_view: HashMap<ContractStorageKey, StarkFelt>,
-    pub address_to_nonce: HashMap<ContractAddress, Nonce>,
-    pub address_to_class_hash: HashMap<ContractAddress, ClassHash>,
-    pub class_hash_to_class: HashMap<ClassHash, ContractClass>,
-    pub class_hash_to_compiled_class_hash: HashMap<ClassHash, CompiledClassHash>,
+pub enum CheatStatus<T> {
+    Cheated(T),
+    Uncheated,
 }
 
-impl StateReader for DictStateReader {
-    fn get_storage_at(
-        &mut self,
-        contract_address: ContractAddress,
-        key: StorageKey,
-    ) -> StateResult<StarkFelt> {
-        let contract_storage_key = (contract_address, key);
-        self.storage_view
-            .get(&contract_storage_key)
-            .copied()
-            .ok_or(StateError::StateReadError(format!(
-                "Unable to get storage at address: {contract_address:?} and key: {key:?} form DictStateReader"
-            )))
+/// Tree structure representing trace of a call.
+pub struct CallTrace {
+    pub entry_point: CallEntryPoint,
+    pub nested_calls: Vec<Rc<RefCell<CallTrace>>>,
+}
+
+pub struct NotEmptyCallStack(Vec<Rc<RefCell<CallTrace>>>);
+
+impl NotEmptyCallStack {
+    pub fn from(elem: Rc<RefCell<CallTrace>>) -> Self {
+        NotEmptyCallStack(vec![elem])
     }
 
-    fn get_nonce_at(&mut self, contract_address: ContractAddress) -> StateResult<Nonce> {
-        self.address_to_nonce
-            .get(&contract_address)
-            .copied()
-            .ok_or(StateError::StateReadError(format!(
-                "Unable to get nonce at {contract_address:?} from DictStateReader"
-            )))
+    pub fn push(&mut self, elem: Rc<RefCell<CallTrace>>) {
+        self.0.push(elem);
     }
 
-    fn get_class_hash_at(&mut self, contract_address: ContractAddress) -> StateResult<ClassHash> {
-        self.address_to_class_hash
-            .get(&contract_address)
-            .copied()
-            .ok_or(StateError::UnavailableContractAddress(contract_address))
+    pub fn top(&mut self) -> Rc<RefCell<CallTrace>> {
+        let top_val = self.0.pop().unwrap();
+        let borrowed_ref = top_val.clone();
+        self.0.push(top_val);
+        borrowed_ref
     }
 
-    fn get_compiled_contract_class(
-        &mut self,
-        class_hash: &ClassHash,
-    ) -> StateResult<ContractClass> {
-        let contract_class = self.class_hash_to_class.get(class_hash).cloned();
-        match contract_class {
-            Some(contract_class) => Ok(contract_class),
-            _ => Err(StateError::UndeclaredClassHash(*class_hash)),
-        }
+    pub fn pop(&mut self) -> Rc<RefCell<CallTrace>> {
+        assert!(self.0.len() > 1, "You cannot make NotEmptyCallStack empty");
+        self.0.pop().unwrap()
     }
 
-    fn get_compiled_class_hash(&mut self, class_hash: ClassHash) -> StateResult<CompiledClassHash> {
-        let compiled_class_hash = self
-            .class_hash_to_compiled_class_hash
-            .get(&class_hash)
-            .copied()
-            .unwrap_or_default();
-        Ok(compiled_class_hash)
+    #[must_use]
+    pub fn borrow_full_trace(&self) -> Ref<'_, CallTrace> {
+        self.0.first().unwrap().borrow()
     }
 }
 
-#[allow(clippy::module_name_repetitions)]
-#[derive(Default)]
+pub struct TraceData {
+    pub current_call_stack: NotEmptyCallStack,
+}
+
 pub struct CheatnetState {
-    pub rolled_contracts: HashMap<ContractAddress, Felt252>,
-    pub pranked_contracts: HashMap<ContractAddress, ContractAddress>,
-    pub warped_contracts: HashMap<ContractAddress, Felt252>,
+    pub rolled_contracts: HashMap<ContractAddress, CheatStatus<Felt252>>,
+    pub global_roll: Option<Felt252>,
+    pub pranked_contracts: HashMap<ContractAddress, CheatStatus<ContractAddress>>,
+    pub global_prank: Option<ContractAddress>,
+    pub warped_contracts: HashMap<ContractAddress, CheatStatus<Felt252>>,
+    pub global_warp: Option<Felt252>,
+    pub elected_contracts: HashMap<ContractAddress, CheatStatus<ContractAddress>>,
+    pub global_elect: Option<ContractAddress>,
     pub mocked_functions: HashMap<ContractAddress, HashMap<EntryPointSelector, Vec<StarkFelt>>>,
-    pub spoofed_contracts: HashMap<ContractAddress, TxInfoMock>,
+    pub spoofed_contracts: HashMap<ContractAddress, CheatStatus<TxInfoMock>>,
+    pub global_spoof: Option<TxInfoMock>,
     pub spies: Vec<SpyTarget>,
     pub detected_events: Vec<Event>,
     pub deploy_salt_base: u32,
-    pub block_info: CheatnetBlockInfo,
+    pub block_info: BlockInfo,
+    // execution resources used by all contract calls
+    pub used_resources: UsedResources,
+
+    pub trace_data: TraceData,
+}
+
+impl Default for CheatnetState {
+    fn default() -> Self {
+        let test_call = Rc::new(RefCell::new(CallTrace {
+            entry_point: build_test_entry_point(),
+            nested_calls: vec![],
+        }));
+        Self {
+            rolled_contracts: Default::default(),
+            global_roll: None,
+            pranked_contracts: Default::default(),
+            global_prank: None,
+            warped_contracts: Default::default(),
+            global_warp: None,
+            elected_contracts: Default::default(),
+            global_elect: None,
+            mocked_functions: Default::default(),
+            spoofed_contracts: Default::default(),
+            global_spoof: None,
+            spies: vec![],
+            detected_events: vec![],
+            deploy_salt_base: 0,
+            block_info: Default::default(),
+            used_resources: Default::default(),
+            trace_data: TraceData {
+                current_call_stack: NotEmptyCallStack::from(test_call),
+            },
+        }
+    }
 }
 
 impl CheatnetState {
@@ -227,31 +241,78 @@ impl CheatnetState {
     }
 
     #[must_use]
-    pub fn address_is_pranked(&self, contract_address: &ContractAddress) -> bool {
-        self.pranked_contracts.contains_key(contract_address)
+    pub fn address_is_rolled(&self, contract_address: &ContractAddress) -> bool {
+        self.get_cheated_block_number(contract_address).is_some()
     }
 
     #[must_use]
     pub fn address_is_warped(&self, contract_address: &ContractAddress) -> bool {
-        self.warped_contracts.contains_key(contract_address)
+        self.get_cheated_block_timestamp(contract_address).is_some()
     }
 
     #[must_use]
-    pub fn address_is_rolled(&self, contract_address: &ContractAddress) -> bool {
-        self.rolled_contracts.contains_key(contract_address)
+    pub fn address_is_pranked(&self, contract_address: &ContractAddress) -> bool {
+        self.get_cheated_caller_address(contract_address).is_some()
+    }
+
+    #[must_use]
+    pub fn address_is_elected(&self, contract_address: &ContractAddress) -> bool {
+        self.get_cheated_sequencer_address(contract_address)
+            .is_some()
     }
 
     #[must_use]
     pub fn address_is_spoofed(&self, contract_address: &ContractAddress) -> bool {
-        self.spoofed_contracts.contains_key(contract_address)
+        self.get_cheated_tx_info(contract_address).is_some()
     }
 
     #[must_use]
-    pub fn address_is_cheated(&self, contract_address: &ContractAddress) -> bool {
-        self.address_is_rolled(contract_address)
-            || self.address_is_pranked(contract_address)
-            || self.address_is_warped(contract_address)
-            || self.address_is_spoofed(contract_address)
+    pub fn get_cheated_block_number(&self, address: &ContractAddress) -> Option<Felt252> {
+        get_cheat_for_contract(&self.global_roll, &self.rolled_contracts, address)
+    }
+
+    #[must_use]
+    pub fn get_cheated_block_timestamp(&self, address: &ContractAddress) -> Option<Felt252> {
+        get_cheat_for_contract(&self.global_warp, &self.warped_contracts, address)
+    }
+
+    #[must_use]
+    pub fn get_cheated_sequencer_address(
+        &self,
+        address: &ContractAddress,
+    ) -> Option<ContractAddress> {
+        get_cheat_for_contract(&self.global_elect, &self.elected_contracts, address)
+    }
+
+    #[must_use]
+    pub fn get_cheated_tx_info(&self, address: &ContractAddress) -> Option<TxInfoMock> {
+        get_cheat_for_contract(&self.global_spoof, &self.spoofed_contracts, address)
+    }
+
+    #[must_use]
+    pub fn get_cheated_caller_address(&self, address: &ContractAddress) -> Option<ContractAddress> {
+        get_cheat_for_contract(&self.global_prank, &self.pranked_contracts, address)
+    }
+}
+
+impl TraceData {
+    pub fn enter_nested_call(&mut self, entry_point: CallEntryPoint) {
+        let new_call = Rc::new(RefCell::new(CallTrace {
+            entry_point,
+            nested_calls: vec![],
+        }));
+        let current_call = self.current_call_stack.top();
+
+        current_call
+            .borrow_mut()
+            .nested_calls
+            .push(new_call.clone());
+
+        self.current_call_stack.push(new_call);
+    }
+
+    pub fn exit_nested_call(&mut self) {
+        self.current_call_stack.pop();
     }
 }
 
@@ -263,4 +324,65 @@ fn match_node_response<T: Default>(result: StateResult<T>) -> StateResult<T> {
         }
         _ => Ok(Default::default()),
     }
+}
+
+fn get_cheat_for_contract<T: Clone>(
+    global_cheat: &Option<T>,
+    contract_cheats: &HashMap<ContractAddress, CheatStatus<T>>,
+    contract: &ContractAddress,
+) -> Option<T> {
+    if let Some(cheated_contract) = contract_cheats.get(contract) {
+        match cheated_contract {
+            CheatStatus::Cheated(contract_cheat) => Some(contract_cheat.clone()),
+            CheatStatus::Uncheated => None,
+        }
+    } else {
+        global_cheat.clone()
+    }
+}
+
+pub fn start_cheat<T: Clone, S: BuildHasher>(
+    global_cheat: &mut Option<T>,
+    contract_cheats: &mut HashMap<ContractAddress, CheatStatus<T>, S>,
+    target: CheatTarget,
+    cheat_value: T,
+) {
+    match target {
+        CheatTarget::All => {
+            *global_cheat = Some(cheat_value);
+            // Clear individual cheats so that `All`
+            // contracts are affected by this cheat
+            contract_cheats.clear();
+        }
+        CheatTarget::One(contract_address) => {
+            (*contract_cheats).insert(contract_address, CheatStatus::Cheated(cheat_value));
+        }
+        CheatTarget::Multiple(contract_addresses) => {
+            for contract_address in contract_addresses {
+                (*contract_cheats)
+                    .insert(contract_address, CheatStatus::Cheated(cheat_value.clone()));
+            }
+        }
+    }
+}
+
+pub fn stop_cheat<T, S: BuildHasher>(
+    global_cheat: &mut Option<T>,
+    contract_cheats: &mut HashMap<ContractAddress, CheatStatus<T>, S>,
+    target: CheatTarget,
+) {
+    match target {
+        CheatTarget::All => {
+            *global_cheat = None;
+            contract_cheats.clear();
+        }
+        CheatTarget::One(contract_address) => {
+            (*contract_cheats).insert(contract_address, CheatStatus::Uncheated);
+        }
+        CheatTarget::Multiple(contract_addresses) => {
+            for contract_address in contract_addresses {
+                (*contract_cheats).insert(contract_address, CheatStatus::Uncheated);
+            }
+        }
+    };
 }

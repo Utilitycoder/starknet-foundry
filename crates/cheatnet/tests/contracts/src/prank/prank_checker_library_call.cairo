@@ -18,9 +18,11 @@ mod PrankCheckerLibCall {
     #[storage]
     struct Storage {}
 
-    #[external(v0)]
+    #[abi(embed_v0)]
     impl IPrankCheckerLibCall of super::IPrankCheckerLibCall<ContractState> {
-        fn get_caller_address_with_lib_call(ref self: ContractState, class_hash: ClassHash) -> felt252 {
+        fn get_caller_address_with_lib_call(
+            ref self: ContractState, class_hash: ClassHash
+        ) -> felt252 {
             let prank_checker = IPrankCheckerLibraryDispatcher { class_hash };
             prank_checker.get_caller_address()
         }

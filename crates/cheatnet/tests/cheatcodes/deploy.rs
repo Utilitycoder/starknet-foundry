@@ -1,12 +1,18 @@
 use crate::assert_success;
 use crate::common::state::{create_cached_state, create_cheatnet_state};
-use crate::common::{deploy_contract, felt_selector_from_name, get_contracts};
+use crate::common::{call_contract, deploy_contract, felt_selector_from_name, get_contracts};
 use cairo_felt::Felt252;
 use cairo_vm::vm::errors::hint_errors::HintError;
-use cheatnet::cheatcodes::deploy::{deploy, deploy_at};
-use cheatnet::cheatcodes::{CheatcodeError, EnhancedHintError};
-use cheatnet::rpc::{call_contract, CallContractFailure, CallContractResult};
-use conversions::StarknetConversions;
+use cheatnet::runtime_extensions::call_to_blockifier_runtime_extension::rpc::{
+    CallFailure, CallResult,
+};
+use cheatnet::runtime_extensions::forge_runtime_extension::cheatcodes::deploy::{
+    deploy, deploy_at,
+};
+use cheatnet::runtime_extensions::forge_runtime_extension::cheatcodes::CheatcodeError;
+use conversions::felt252::FromShortString;
+use conversions::IntoConv;
+use runtime::EnhancedHintError;
 use starknet_api::core::ContractAddress;
 
 #[test]
@@ -14,7 +20,7 @@ fn deploy_at_predefined_address() {
     let mut cached_state = create_cached_state();
     let (mut blockifier_state, mut cheatnet_state) = create_cheatnet_state(&mut cached_state);
 
-    let contract = "HelloStarknet".to_owned().to_felt252();
+    let contract = Felt252::from_short_string("HelloStarknet").unwrap();
     let contracts = get_contracts();
 
     let class_hash = blockifier_state.declare(&contract, &contracts).unwrap();
@@ -48,7 +54,7 @@ fn deploy_two_at_the_same_address() {
     let mut cached_state = create_cached_state();
     let (mut blockifier_state, mut cheatnet_state) = create_cheatnet_state(&mut cached_state);
 
-    let contract = "HelloStarknet".to_owned().to_felt252();
+    let contract = Felt252::from_short_string("HelloStarknet").unwrap();
     let contracts = get_contracts();
 
     let class_hash = blockifier_state.declare(&contract, &contracts).unwrap();
@@ -81,7 +87,7 @@ fn call_predefined_contract_from_proxy_contract() {
     let mut cached_state = create_cached_state();
     let (mut blockifier_state, mut cheatnet_state) = create_cheatnet_state(&mut cached_state);
 
-    let contract = "PrankChecker".to_owned().to_felt252();
+    let contract = Felt252::from_short_string("PrankChecker").unwrap();
     let contracts = get_contracts();
 
     let class_hash = blockifier_state.declare(&contract, &contracts).unwrap();
@@ -109,11 +115,11 @@ fn call_predefined_contract_from_proxy_contract() {
         &mut cheatnet_state,
         &proxy_address,
         &proxy_selector,
-        &[prank_checker_address.to_felt252()],
+        &[prank_checker_address.into_()],
     )
     .unwrap();
 
-    assert_success!(output, vec![proxy_address.to_felt252()]);
+    assert_success!(output, vec![proxy_address.into_()]);
 }
 
 #[test]
@@ -141,13 +147,13 @@ fn deploy_contract_on_predefined_address_after_its_usage() {
     assert!(
         matches!(
             output.result,
-            CallContractResult::Failure(CallContractFailure::Error { msg, .. })
+            CallResult::Failure(CallFailure::Error { msg, .. })
             if msg.contains("Requested contract address") && msg.contains("is not deployed")
         ),
         "Wrong error message"
     );
 
-    let contract = "SpyEventsChecker".to_owned().to_felt252();
+    let contract = Felt252::from_short_string("SpyEventsChecker").unwrap();
     let contracts = get_contracts();
 
     let class_hash = blockifier_state.declare(&contract, &contracts).unwrap();
@@ -177,7 +183,7 @@ fn try_to_deploy_at_0() {
     let mut cached_state = create_cached_state();
     let (mut blockifier_state, mut cheatnet_state) = create_cheatnet_state(&mut cached_state);
 
-    let contract = "HelloStarknet".to_owned().to_felt252();
+    let contract = Felt252::from_short_string("HelloStarknet").unwrap();
     let contracts = get_contracts();
 
     let class_hash = blockifier_state.declare(&contract, &contracts).unwrap();
@@ -201,7 +207,7 @@ fn deploy_calldata_no_constructor() {
     let mut cached_state = create_cached_state();
     let (mut blockifier_state, mut cheatnet_state) = create_cheatnet_state(&mut cached_state);
 
-    let contract = "HelloStarknet".to_owned().to_felt252();
+    let contract = Felt252::from_short_string("HelloStarknet").unwrap();
     let contracts = get_contracts();
 
     let class_hash = blockifier_state.declare(&contract, &contracts).unwrap();
@@ -226,7 +232,7 @@ fn deploy_missing_arguments_in_constructor() {
     let mut cached_state = create_cached_state();
     let (mut blockifier_state, mut cheatnet_state) = create_cheatnet_state(&mut cached_state);
 
-    let contract = "ConstructorSimple2".to_owned().to_felt252();
+    let contract = Felt252::from_short_string("ConstructorSimple2").unwrap();
     let contracts = get_contracts();
 
     let class_hash = blockifier_state.declare(&contract, &contracts).unwrap();
@@ -240,7 +246,7 @@ fn deploy_missing_arguments_in_constructor() {
 
     assert!(match output {
         Err(CheatcodeError::Unrecoverable(EnhancedHintError::Hint(HintError::CustomHint(msg)))) =>
-            msg.as_ref() == "Failed to deserialize param #2",
+            msg.as_ref() == "0x4661696c656420746f20646573657269616c697a6520706172616d202332 ('Failed to deserialize param #2')",
         _ => false,
     });
 }
@@ -250,7 +256,7 @@ fn deploy_too_many_arguments_in_constructor() {
     let mut cached_state = create_cached_state();
     let (mut blockifier_state, mut cheatnet_state) = create_cheatnet_state(&mut cached_state);
 
-    let contract = "ConstructorSimple".to_owned().to_felt252();
+    let contract = Felt252::from_short_string("ConstructorSimple").unwrap();
     let contracts = get_contracts();
 
     let class_hash = blockifier_state.declare(&contract, &contracts).unwrap();
@@ -264,7 +270,7 @@ fn deploy_too_many_arguments_in_constructor() {
 
     assert!(match output {
         Err(CheatcodeError::Unrecoverable(EnhancedHintError::Hint(HintError::CustomHint(msg)))) =>
-            msg.as_ref() == "Input too long for arguments",
+            msg.as_ref() == "0x496e70757420746f6f206c6f6e6720666f7220617267756d656e7473 ('Input too long for arguments')",
         _ => false,
     });
 }
@@ -274,7 +280,9 @@ fn deploy_invalid_class_hash() {
     let mut cached_state = create_cached_state();
     let (mut blockifier_state, mut cheatnet_state) = create_cheatnet_state(&mut cached_state);
 
-    let class_hash = "Invalid ClassHash".to_owned().to_class_hash();
+    let class_hash = Felt252::from_short_string("Invalid ClassHash")
+        .unwrap()
+        .into_();
 
     let output = deploy(
         &mut blockifier_state,
@@ -321,7 +329,7 @@ fn deploy_at_invokes_constructor() {
     let mut cached_state = create_cached_state();
     let (mut blockifier_state, mut cheatnet_state) = create_cheatnet_state(&mut cached_state);
 
-    let contract = "ConstructorSimple".to_string().to_felt252();
+    let contract = Felt252::from_short_string("ConstructorSimple").unwrap();
     let contracts = get_contracts();
 
     let class_hash = blockifier_state.declare(&contract, &contracts).unwrap();
@@ -331,7 +339,7 @@ fn deploy_at_invokes_constructor() {
         &mut cheatnet_state,
         &class_hash,
         &[Felt252::from(123)],
-        Felt252::from(420).to_contract_address(),
+        Felt252::from(420).into_(),
     )
     .unwrap()
     .contract_address;

@@ -8,7 +8,7 @@ use test_utils::{assert_case_output_contains, assert_failed, assert_passed, test
 fn deploy_at_correct_address() {
     let test = test_case!(
         indoc!(
-            r#"
+            r"
         use snforge_std::{ declare, ContractClassTrait };
         use starknet::ContractAddress;
         
@@ -18,7 +18,7 @@ fn deploy_at_correct_address() {
         }
 
         #[test]
-        fn test_deploy_at() {
+        fn deploy_at_correct_address() {
             let contract = declare('PrankChecker');
             let prank_checker = contract.deploy(@array![]).unwrap();
         
@@ -31,30 +31,39 @@ fn deploy_at_correct_address() {
             let real_address = IProxyDispatcher{ contract_address }.get_caller_address(prank_checker);
             assert(real_address == contract_address.into(), 'addresses should be the same');
         }
-    "#
+    "
         ),
         Contract::new(
             "Proxy",
             indoc!(
-                r#"
+                r"
+                use starknet::ContractAddress;
+
+                #[starknet::interface]
+                trait IProxy<TContractState> {
+                    fn get_caller_address(ref self: TContractState, checker_address: ContractAddress) -> felt252;
+                }
+
                 #[starknet::contract]
                 mod Proxy {
                     use starknet::ContractAddress;
                                                     
                     #[storage]
                     struct Storage {}
-                    
+
                     #[starknet::interface]
                     trait IPrankChecker<TContractState> {
                         fn get_caller_address(ref self: TContractState) -> felt252;
                     }
                 
-                    #[external(v0)]
-                    fn get_caller_address(ref self: ContractState, checker_address: ContractAddress) -> felt252 {
-                        IPrankCheckerDispatcher{ contract_address: checker_address}.get_caller_address()
+                    #[abi(embed_v0)]
+                    impl ProxyImpl of super::IProxy<ContractState> {
+                        fn get_caller_address(ref self: ContractState, checker_address: ContractAddress) -> felt252 {
+                            IPrankCheckerDispatcher{ contract_address: checker_address}.get_caller_address()
+                        }
                     }
                 }
-            "#
+            "
             )
         ),
         Contract::from_code_path(
@@ -73,20 +82,20 @@ fn deploy_at_correct_address() {
 fn deploy_two_at_the_same_address() {
     let test = test_case!(
         indoc!(
-            r#"
+            r"
         use snforge_std::{ declare, ContractClassTrait };
         use starknet::ContractAddress;
 
         #[test]
-        fn test_deploy_two_at_the_same_address() {
+        fn deploy_two_at_the_same_address() {
             let contract_address = 123;
         
             let contract = declare('HelloStarknet');
             let real_address = contract.deploy_at(@array![], contract_address.try_into().unwrap()).unwrap();
             assert(real_address.into() == contract_address, 'addresses should be the same');
-            let real_address2 = contract.deploy_at(@array![], contract_address.try_into().unwrap()).unwrap();
+            contract.deploy_at(@array![], contract_address.try_into().unwrap()).unwrap();
         }
-    "#
+    "
         ),
         Contract::from_code_path(
             "HelloStarknet".to_string(),
@@ -100,7 +109,7 @@ fn deploy_two_at_the_same_address() {
     assert_failed!(result);
     assert_case_output_contains!(
         result,
-        "test_deploy_two_at_the_same_address",
+        "deploy_two_at_the_same_address",
         "Address is already taken"
     );
 }
@@ -109,13 +118,13 @@ fn deploy_two_at_the_same_address() {
 fn deploy_at_error_handling() {
     let test = test_case!(
         indoc!(
-            r#"
+            r"
         use array::ArrayTrait;
         use snforge_std::{ declare, ContractClassTrait, RevertedTransaction };
         use starknet::ContractAddress;
 
         #[test]
-        fn test_deploy_at_error_handling() {
+        fn deploy_at_error_handling() {
             let contract_address = 123;
         
             let contract = declare('PanickingConstructor');
@@ -127,7 +136,7 @@ fn deploy_at_error_handling() {
                 },
             }
         }
-    "#
+    "
         ),
         Contract::from_code_path(
             "PanickingConstructor".to_string(),

@@ -8,7 +8,7 @@ use test_utils::{assert_passed, test_case};
 fn mock_call_simple() {
     let test = test_case!(
         indoc!(
-            r#"
+            r"
         use result::ResultTrait;
         use snforge_std::{ declare, ContractClassTrait, start_mock_call, stop_mock_call };
 
@@ -38,7 +38,7 @@ fn mock_call_simple() {
         }
 
         #[test]
-        fn mock_call_before_dispatcher_created() {
+        fn mock_call_simple_before_dispatcher_created() {
             let calldata = array![420];
 
             let contract = declare('MockChecker');
@@ -52,7 +52,7 @@ fn mock_call_simple() {
 
             assert(thing == 421, 'Incorrect thing');
         }
-    "#
+    "
         ),
         Contract::from_code_path(
             "MockChecker".to_string(),
@@ -66,10 +66,10 @@ fn mock_call_simple() {
 }
 
 #[test]
-fn mock_call_complex_dtypes() {
+fn mock_call_complex_types() {
     let test = test_case!(
         indoc!(
-            r#"
+            r"
         use result::ResultTrait;
         use array::ArrayTrait;
         use serde::Serde;
@@ -127,7 +127,7 @@ fn mock_call_complex_dtypes() {
             assert(*thing.item_one == 412, 'thing2.item_one');
             assert(*thing.item_two == 421, 'thing2.item_two');
         }
-    "#
+    "
         ),
         Contract::from_code_path(
             "MockChecker".to_string(),

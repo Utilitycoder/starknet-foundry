@@ -5,10 +5,10 @@ use test_utils::running_tests::run_test_case;
 use test_utils::{assert_passed, test_case};
 
 #[test]
-fn l1_handler_executor() {
+fn l1_handler_execute() {
     let test = test_case!(
         indoc!(
-            r#"
+            r"
             #[derive(Copy, Serde, Drop)]
             struct L1Data {
                 balance: felt252,
@@ -27,7 +27,7 @@ fn l1_handler_executor() {
             use snforge_std::{declare, ContractClassTrait, L1Handler, L1HandlerTrait, RevertedTransaction};
 
             #[test]
-            fn test_l1_handler_execute() {
+            fn l1_handler_execute() {
                 let calldata = array![0x123];
 
                 let contract = declare('l1_handler_executor');
@@ -57,7 +57,7 @@ fn l1_handler_executor() {
             }
              
             #[test]
-            fn test_l1_handler_execute_panicking() {
+            fn l1_handler_execute_panicking() {
                 let calldata = array![0x123];
 
                 let contract = declare('l1_handler_executor');
@@ -79,7 +79,7 @@ fn l1_handler_executor() {
                     },
                 }
             }
-        "#
+        "
         ),
         Contract::from_code_path(
             "l1_handler_executor".to_string(),

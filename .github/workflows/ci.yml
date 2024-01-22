@@ -8,9 +8,6 @@ on:
       - master
   workflow_dispatch:
 
-env:
-  SCARB_VERSION: 2.3.0
-
 jobs:
   test-forge-unit-and-integration:
     name: Test Forge / Unit and Integration Tests
@@ -18,10 +15,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@3cf7f8cc28d1b4e7d01e3783be10a97d55d483c8
+      - uses: Swatinem/rust-cache@23bce251a8cd2ffc3c1075eaa2367cf899916d84
       - uses: software-mansion/setup-scarb@v1.3.2
-        with:
-          scarb-version: ${{ env.SCARB_VERSION }}
       - run: cargo test --release --lib -p forge
       - run: cargo test --release integration -p forge
 
@@ -53,11 +48,18 @@ jobs:
 
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@3cf7f8cc28d1b4e7d01e3783be10a97d55d483c8
+      - uses: Swatinem/rust-cache@23bce251a8cd2ffc3c1075eaa2367cf899916d84
       - uses: software-mansion/setup-scarb@v1.3.2
-        with:
-          scarb-version: ${{ env.SCARB_VERSION }}
       - run: cargo test --release e2e -p forge
+
+  test-forge-runner:
+    name: Test Forge Runner
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@23bce251a8cd2ffc3c1075eaa2367cf899916d84
+      - run: cargo test --release -p forge_runner
 
   test-cheatnet:
     name: Test Cheatnet
@@ -65,10 +67,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@3cf7f8cc28d1b4e7d01e3783be10a97d55d483c8
+      - uses: Swatinem/rust-cache@23bce251a8cd2ffc3c1075eaa2367cf899916d84
       - uses: software-mansion/setup-scarb@v1.3.2
-        with:
-          scarb-version: ${{ env.SCARB_VERSION }}
       - name: Run Cheatnet tests
         run: cargo test -p cheatnet
 
@@ -77,36 +77,79 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@439cf607258077187679211f12aa6f19af4a0af7
+      - uses: dtolnay/rust-toolchain@be73d7920c329f220ce78e0234b8f96b7ae60248
         with:
           toolchain: stable
-      - uses: Swatinem/rust-cache@3cf7f8cc28d1b4e7d01e3783be10a97d55d483c8
+      - uses: Swatinem/rust-cache@23bce251a8cd2ffc3c1075eaa2367cf899916d84
         with:
-          cache-directories: crates/cast/tests/utils/devnet
+          cache-directories: crates/sncast/tests/utils/devnet
       - name: Install starknet-devnet-rs
         run: ./scripts/install_devnet.sh
       - uses: software-mansion/setup-scarb@v1.3.2
-        with:
-          scarb-version: ${{ env.SCARB_VERSION }}
       - name: Run tests
-        run: cargo test --release -p cast
+        run: cargo test --release -p sncast
+
+  test-conversions:
+    name: Test Conversions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@be73d7920c329f220ce78e0234b8f96b7ae60248
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@23bce251a8cd2ffc3c1075eaa2367cf899916d84
+      - name: Run tests
+        run: cargo test --release -p conversions
+
+  test-sierra-casm:
+    name: Test Sierra Casm
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@be73d7920c329f220ce78e0234b8f96b7ae60248
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@23bce251a8cd2ffc3c1075eaa2367cf899916d84
+      - name: Run tests
+        run: cargo test --release -p sierra-casm
+
+  test-scarb-api:
+    name: Test Scarb Api
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@23bce251a8cd2ffc3c1075eaa2367cf899916d84
+      - uses: software-mansion/setup-scarb@v1.3.2
+      - run: cargo test --release -p scarb-api
+
+  scarbfmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: software-mansion/setup-scarb@v1.3.2
+      - name: Check cairo files format
+        run: |
+          output=$(find . -type f -name "Scarb.toml" -execdir sh -c '
+              echo "Running \"scarb fmt\" in directory: $PWD"
+              scarb fmt --check
+          ' \;)
+          echo "$output"
+          if grep -iq "Diff" <<< "$output"; then
+              exit 1
+          fi
+          exit 0
 
   rustfmt:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@439cf607258077187679211f12aa6f19af4a0af7
+      - uses: dtolnay/rust-toolchain@be73d7920c329f220ce78e0234b8f96b7ae60248
         with:
           toolchain: stable
-      - uses: Swatinem/rust-cache@3cf7f8cc28d1b4e7d01e3783be10a97d55d483c8
-      - name: Check forge formatting
-        run: cargo fmt --check -p forge
-      - name: Check cast formatting
-        run: cargo fmt --check -p cast
-      - name: Check test-collector formatting
-        run: cargo fmt --check -p test-collector
-      - name: Check cheatnet formatting
-        run: cargo fmt --check -p cheatnet
+      - uses: Swatinem/rust-cache@23bce251a8cd2ffc3c1075eaa2367cf899916d84
+      - name: Check formatting
+        run: cargo fmt --check
 
   clippy:
     runs-on: ubuntu-latest
@@ -115,10 +158,10 @@ jobs:
       RUSTFLAGS: "-Dwarnings"
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@439cf607258077187679211f12aa6f19af4a0af7
+      - uses: dtolnay/rust-toolchain@be73d7920c329f220ce78e0234b8f96b7ae60248
         with:
           toolchain: stable
-      - uses: Swatinem/rust-cache@3cf7f8cc28d1b4e7d01e3783be10a97d55d483c8
+      - uses: Swatinem/rust-cache@23bce251a8cd2ffc3c1075eaa2367cf899916d84
       - run: cargo lint
 
   build-docs:
@@ -127,10 +170,10 @@ jobs:
     env:
       MDBOOK_VERSION: 0.4.31
     steps:
-      - uses: dtolnay/rust-toolchain@439cf607258077187679211f12aa6f19af4a0af7
+      - uses: dtolnay/rust-toolchain@be73d7920c329f220ce78e0234b8f96b7ae60248
         with:
           toolchain: stable
-      - uses: Swatinem/rust-cache@3cf7f8cc28d1b4e7d01e3783be10a97d55d483c8
+      - uses: Swatinem/rust-cache@23bce251a8cd2ffc3c1075eaa2367cf899916d84
       - uses: actions/checkout@v4
       - name: Install mdBook
         run: |
@@ -138,3 +181,11 @@ jobs:
       - name: Build with mdBook
         run: mdbook build
         working-directory: ./docs
+
+  typos:
+    name: Check typos
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: typos-action
+        uses: crate-ci/typos@v1.17.1

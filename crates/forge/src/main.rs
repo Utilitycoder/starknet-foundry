@@ -1,34 +1,34 @@
 use anyhow::{anyhow, bail, Context, Result};
-use camino::{Utf8Path, Utf8PathBuf};
+use camino::Utf8Path;
 use clap::{Parser, Subcommand, ValueEnum};
-use forge::scarb::config_from_scarb_for_package;
-use include_dir::{include_dir, Dir};
-use scarb_artifacts::{
-    corelib_for_package, dependencies_for_package, get_contracts_map, name_for_package,
-    paths_for_package,
+use forge::pretty_printing::print_warning;
+use forge::scarb::config::ForgeConfig;
+use forge::scarb::{
+    build_contracts_with_scarb, build_test_artifacts_with_scarb, config_from_scarb_for_package,
+};
+use forge::shared_cache::{clean_cache, set_cached_failed_tests_names};
+use forge::test_filter::TestsFilter;
+use forge::{pretty_printing, run};
+use forge_runner::test_case_summary::{AnyTestCaseSummary, TestCaseSummary};
+use forge_runner::test_crate_summary::TestCrateSummary;
+use forge_runner::{RunnerConfig, RunnerParams, CACHE_DIR};
+use rand::{thread_rng, RngCore};
+use scarb_api::{
+    get_contracts_map, package_matches_version_requirement, target_dir_for_workspace, ScarbCommand,
 };
 use scarb_metadata::{Metadata, MetadataCommand, PackageMetadata};
 use scarb_ui::args::PackagesFilter;
-use std::path::PathBuf;
+
+use forge::block_number_map::BlockNumberMap;
+use semver::{Comparator, Op, Version, VersionReq};
+use std::env;
 use std::sync::Arc;
-use std::{env, fs};
-use tempfile::{tempdir, TempDir};
-use tokio::runtime::Builder;
-
-use forge::{pretty_printing, RunnerConfig, RunnerParams, CACHE_DIR, FUZZER_RUNS_DEFAULT};
-
-use forge::{run, TestCrateSummary};
-
-use forge::scarb::config::ForgeConfig;
-use forge::test_case_summary::TestCaseSummary;
-use forge::test_filter::TestsFilter;
-use rand::{thread_rng, RngCore};
-use std::process::{Command, Stdio};
 use std::thread::available_parallelism;
+use tokio::runtime::Builder;
 
 mod init;
 
-static PREDEPLOYED_CONTRACTS: Dir = include_dir!("crates/cheatnet/predeployed-contracts");
+const FUZZER_RUNS_DEFAULT: u32 = 256;
 
 #[derive(Parser, Debug)]
 #[command(version)]
@@ -94,6 +94,10 @@ struct TestArgs {
     /// Control when colored output is used
     #[arg(value_enum, long, default_value_t = ColorOption::Auto, value_name="WHEN")]
     color: ColorOption,
+
+    /// Run tests that failed during the last run
+    #[arg(long)]
+    rerun_failed: bool,
 }
 
 fn validate_fuzzer_runs_value(val: &str) -> Result<u32> {
@@ -106,29 +110,17 @@ fn validate_fuzzer_runs_value(val: &str) -> Result<u32> {
     Ok(parsed_val)
 }
 
-fn clean_cache() -> Result<()> {
-    let scarb_metadata = MetadataCommand::new().inherit_stderr().exec()?;
-    let workspace_root = scarb_metadata.workspace.root.clone();
-    let cache_dir = workspace_root.join(CACHE_DIR);
-    if cache_dir.exists() {
-        fs::remove_dir_all(cache_dir)?;
-    }
-    Ok(())
-}
-
-fn load_predeployed_contracts() -> Result<TempDir> {
-    let tmp_dir = tempdir()?;
-    PREDEPLOYED_CONTRACTS
-        .extract(&tmp_dir)
-        .context("Failed to copy corelib to temporary directory")?;
-    Ok(tmp_dir)
-}
-
-fn extract_failed_tests(tests_summaries: Vec<TestCrateSummary>) -> Vec<TestCaseSummary> {
+fn extract_failed_tests(tests_summaries: Vec<TestCrateSummary>) -> Vec<AnyTestCaseSummary> {
     tests_summaries
         .into_iter()
         .flat_map(|test_file_summary| test_file_summary.test_case_summaries)
-        .filter(|test_case_summary| matches!(test_case_summary, TestCaseSummary::Failed { .. }))
+        .filter(|test_case_summary| {
+            matches!(
+                test_case_summary,
+                AnyTestCaseSummary::Fuzzing(TestCaseSummary::Failed { .. })
+                    | AnyTestCaseSummary::Single(TestCaseSummary::Failed { .. })
+            )
+        })
         .collect()
 }
 
@@ -142,7 +134,6 @@ fn combine_configs(
     RunnerConfig::new(
         workspace_root.to_path_buf(),
         exit_first || forge_config.exit_first,
-        forge_config.fork.clone(),
         fuzzer_runs
             .or(forge_config.fuzzer_runs)
             .unwrap_or(FUZZER_RUNS_DEFAULT),
@@ -152,6 +143,33 @@ fn combine_configs(
     )
 }
 
+fn snforge_std_version_requirement() -> VersionReq {
+    let version = Version::parse(env!("CARGO_PKG_VERSION")).unwrap();
+    let comparator = Comparator {
+        op: Op::Exact,
+        major: version.major,
+        minor: Some(version.minor),
+        patch: Some(version.patch),
+        pre: version.pre,
+    };
+    VersionReq {
+        comparators: vec![comparator],
+    }
+}
+
+fn warn_if_snforge_std_not_compatible(scarb_metadata: &Metadata) -> Result<()> {
+    let snforge_std_version_requirement = snforge_std_version_requirement();
+    if !package_matches_version_requirement(
+        scarb_metadata,
+        "snforge_std",
+        &snforge_std_version_requirement,
+    )? {
+        print_warning(&anyhow!("Package snforge_std version does not meet the recommended version requirement {snforge_std_version_requirement}, it might result in unexpected behaviour"));
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_lines)]
 fn test_workspace(args: TestArgs) -> Result<bool> {
     match args.color {
         ColorOption::Always => env::set_var("CLICOLOR_FORCE", "1"),
@@ -159,13 +177,13 @@ fn test_workspace(args: TestArgs) -> Result<bool> {
         ColorOption::Auto => (),
     }
 
-    let predeployed_contracts_dir = load_predeployed_contracts()?;
-    let predeployed_contracts_path: PathBuf = predeployed_contracts_dir.path().into();
-    let predeployed_contracts = Utf8PathBuf::try_from(predeployed_contracts_path.clone())
-        .context("Failed to convert path to predeployed contracts to Utf8PathBuf")?;
-
     let scarb_metadata = MetadataCommand::new().inherit_stderr().exec()?;
+    warn_if_snforge_std_not_compatible(&scarb_metadata)?;
+
     let workspace_root = scarb_metadata.workspace.root.clone();
+    let snforge_target_dir_path = target_dir_for_workspace(&scarb_metadata)
+        .join(&scarb_metadata.current_profile)
+        .join("snforge");
 
     let packages: Vec<PackageMetadata> = args
         .packages_filter
@@ -173,16 +191,9 @@ fn test_workspace(args: TestArgs) -> Result<bool> {
         .context("Failed to find any packages matching the specified filter")?;
 
     let filter = PackagesFilter::generate_for::<Metadata>(packages.iter());
-    let build_output = Command::new("scarb")
-        .arg("build")
-        .env("SCARB_PACKAGES_FILTER", filter.to_env())
-        .stderr(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .output()
-        .context("Failed to build contracts with Scarb")?;
-    if !build_output.status.success() {
-        bail!("Scarb build did not succeed")
-    }
+
+    build_test_artifacts_with_scarb(filter.clone())?;
+    build_contracts_with_scarb(filter.clone())?;
 
     let cores = if let Ok(available_cores) = available_parallelism() {
         available_cores.get()
@@ -198,17 +209,12 @@ fn test_workspace(args: TestArgs) -> Result<bool> {
 
     let all_failed_tests = rt.block_on({
         rt.spawn(async move {
+            let mut block_number_map = BlockNumberMap::default();
             let mut all_failed_tests = vec![];
             for package in &packages {
+                env::set_current_dir(&package.root)?;
+
                 let forge_config = config_from_scarb_for_package(&scarb_metadata, &package.id)?;
-                let (package_path, package_source_dir_path) =
-                    paths_for_package(&scarb_metadata, &package.id)?;
-                env::set_current_dir(package_path.clone())?;
-
-                let package_name = Arc::new(name_for_package(&scarb_metadata, &package.id)?);
-                let dependencies = dependencies_for_package(&scarb_metadata, &package.id)?;
-                let corelib_path = corelib_for_package(&scarb_metadata, &package.id)?;
-
                 let contracts = get_contracts_map(&scarb_metadata, &package.id).unwrap_or_default();
 
                 let runner_config = Arc::new(combine_configs(
@@ -218,44 +224,37 @@ fn test_workspace(args: TestArgs) -> Result<bool> {
                     args.fuzzer_seed,
                     &forge_config,
                 ));
-
-                let runner_params = Arc::new(RunnerParams::new(
-                    corelib_path,
-                    contracts,
-                    predeployed_contracts.clone(),
-                    env::vars().collect(),
-                    dependencies,
-                ));
+                let runner_params = Arc::new(RunnerParams::new(contracts, env::vars().collect()));
 
                 let tests_file_summaries = run(
-                    &package_path,
-                    &package_name,
-                    &package_source_dir_path,
+                    &package.name,
+                    &snforge_target_dir_path,
                     &TestsFilter::from_flags(
                         args.test_filter.clone(),
                         args.exact,
                         args.only_ignored,
                         args.include_ignored,
+                        args.rerun_failed,
+                        workspace_root.join(CACHE_DIR),
                     ),
                     runner_config,
                     runner_params,
+                    &forge_config.fork,
+                    &mut block_number_map,
                 )
                 .await?;
 
                 let mut failed_tests = extract_failed_tests(tests_file_summaries);
                 all_failed_tests.append(&mut failed_tests);
             }
+            set_cached_failed_tests_names(&all_failed_tests, &workspace_root.join(CACHE_DIR))?;
+            pretty_printing::print_latest_blocks_numbers(
+                block_number_map.get_url_to_latest_block_number(),
+            );
+
             Ok::<_, anyhow::Error>(all_failed_tests)
         })
     })??;
-
-    // Explicitly close the temporary directories so we can handle the errors
-    predeployed_contracts_dir.close().with_context(|| {
-        anyhow!(
-            "Failed to close temporary directory = {} with predeployed contracts. Predeployed contract files might have not been released from filesystem",
-            predeployed_contracts_path.display()
-        )
-    })?;
 
     pretty_printing::print_failures(&all_failed_tests);
 
@@ -266,8 +265,7 @@ fn test_workspace(args: TestArgs) -> Result<bool> {
 fn main_execution() -> Result<bool> {
     let cli = Cli::parse();
 
-    which::which("scarb")
-        .context("Cannot find `scarb` binary in PATH. Make sure you have Scarb installed https://github.com/software-mansion/scarb")?;
+    ScarbCommand::new().ensure_available()?;
 
     match cli.subcommand {
         ForgeSubcommand::Init { name } => {
@@ -296,6 +294,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use camino::Utf8PathBuf;
 
     #[test]
     fn fuzzer_default_seed() {
@@ -314,13 +313,12 @@ mod tests {
         let config = combine_configs(&workspace_root, false, None, None, &Default::default());
         assert_eq!(
             config,
-            RunnerConfig {
+            RunnerConfig::new(
                 workspace_root,
-                exit_first: false,
-                fork_targets: vec![],
-                fuzzer_runs: FUZZER_RUNS_DEFAULT,
-                fuzzer_seed: config.fuzzer_seed,
-            }
+                false,
+                FUZZER_RUNS_DEFAULT,
+                config.fuzzer_seed,
+            )
         );
     }
 
@@ -335,16 +333,7 @@ mod tests {
         let workspace_root: Utf8PathBuf = Default::default();
 
         let config = combine_configs(&workspace_root, false, None, None, &config_from_scarb);
-        assert_eq!(
-            config,
-            RunnerConfig {
-                workspace_root,
-                exit_first: true,
-                fork_targets: vec![],
-                fuzzer_runs: 1234,
-                fuzzer_seed: 500,
-            }
-        );
+        assert_eq!(config, RunnerConfig::new(workspace_root, true, 1234, 500));
     }
 
     #[test]
@@ -364,15 +353,7 @@ mod tests {
             Some(32),
             &config_from_scarb,
         );
-        assert_eq!(
-            config,
-            RunnerConfig {
-                workspace_root,
-                exit_first: true,
-                fork_targets: vec![],
-                fuzzer_runs: 100,
-                fuzzer_seed: 32,
-            }
-        );
+
+        assert_eq!(config, RunnerConfig::new(workspace_root, true, 100, 32,));
     }
 }

@@ -1,7 +1,14 @@
-use crate::test_case_summary::TestCaseSummary;
-use crate::{CrateLocation, TestCrateSummary};
+use crate::compiled_raw::CrateLocation;
 use anyhow::Error;
 use console::style;
+use forge_runner::{test_case_summary::AnyTestCaseSummary, test_crate_summary::TestCrateSummary};
+use starknet_api::block::BlockNumber;
+use std::collections::HashMap;
+
+pub fn print_warning(error: &Error) {
+    let warning_tag = style("WARNING").color256(11);
+    println!("[{warning_tag}] {error}");
+}
 
 pub fn print_error_message(error: &Error) {
     let error_tag = style("ERROR").red();
@@ -44,74 +51,27 @@ pub(crate) fn print_test_seed(seed: u64) {
     println!("{}: {seed}", style("Fuzzer seed").bold());
 }
 
-pub(crate) fn print_test_result(test_result: &TestCaseSummary) {
-    if let TestCaseSummary::Skipped { .. } = test_result {
-        return;
-    }
-
-    let result_header = match test_result {
-        TestCaseSummary::Passed { .. } => format!("[{}]", style("PASS").green()),
-        TestCaseSummary::Failed { .. } => format!("[{}]", style("FAIL").red()),
-        TestCaseSummary::Ignored { .. } => format!("[{}]", style("IGNORE").yellow()),
-        TestCaseSummary::Skipped { .. } => {
-            unreachable!()
-        }
-    };
-
-    let result_name = match test_result {
-        TestCaseSummary::Ignored { name }
-        | TestCaseSummary::Failed { name, .. }
-        | TestCaseSummary::Passed { name, .. } => name,
-        TestCaseSummary::Skipped {} => {
-            unreachable!()
-        }
-    };
-
-    let result_message = match test_result {
-        TestCaseSummary::Passed { msg: Some(msg), .. } => format!("\n\nSuccess data:{msg}"),
-        TestCaseSummary::Failed { msg: Some(msg), .. } => format!("\n\nFailure data:{msg}"),
-        _ => String::new(),
-    };
-
-    let fuzzer_report = match test_result.runs() {
-        None => String::new(),
-        Some(runs) => {
-            if matches!(test_result, TestCaseSummary::Failed { .. }) {
-                let arguments = test_result.arguments();
-                format!(" (fuzzer runs = {runs}, arguments = {arguments:?})")
-            } else {
-                format!(" (fuzzer runs = {runs})")
-            }
-        }
-    };
-
-    let block_number_message = match test_result.latest_block_number() {
-        None => String::new(),
-        Some(latest_block_number) => {
-            format!("\nNumber of the block used for fork testing = {latest_block_number}")
-        }
-    };
-
-    println!("{result_header} {result_name}{fuzzer_report}{block_number_message}{result_message}");
-}
-
-pub fn print_failures(all_failed_tests: &[TestCaseSummary]) {
+pub fn print_failures(all_failed_tests: &[AnyTestCaseSummary]) {
     if all_failed_tests.is_empty() {
         return;
     }
-
     let failed_tests_names: Vec<&String> = all_failed_tests
         .iter()
-        .map(|test_case_summary| match test_case_summary {
-            TestCaseSummary::Failed { name, .. } => name,
-            TestCaseSummary::Passed { .. }
-            | TestCaseSummary::Ignored { .. }
-            | TestCaseSummary::Skipped {} => unreachable!(),
-        })
+        .map(|any_test_case_summary| any_test_case_summary.name().unwrap())
         .collect();
 
     println!("\nFailures:");
     for name in failed_tests_names {
         println!("    {name}");
+    }
+}
+
+#[allow(clippy::implicit_hasher)]
+pub fn print_latest_blocks_numbers(url_to_latest_block_number_map: &HashMap<String, BlockNumber>) {
+    if !url_to_latest_block_number_map.is_empty() {
+        println!();
+    }
+    for (url, latest_block_number) in url_to_latest_block_number_map {
+        println!("Latest block number = {latest_block_number} for url = {url}");
     }
 }
